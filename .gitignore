@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+__pycache__/
+*.py[cod]
+.venv/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+assets/
+*.pdf
+.DS_Store

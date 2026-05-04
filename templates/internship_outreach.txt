@@ -1,0 +1,11 @@
+Hi {first_name},
+
+I came across {company_name} while looking for U.S.-based teams hiring around data analytics, data science, and AI engineering internships.
+
+{company_specific_reason}
+
+I am exploring Data Analyst Intern, AI Engineer Intern, Data Science Intern, or related data-focused roles where I can contribute quickly. Recently, I supported Walmart retail analytics as a Data Analyst, built Python ETL and data validation pipelines, and developed a Streamlit forensic analytics dashboard for EY's UMD 2026 Case Competition that earned Best Data Scientist recognition. I have also built AI/ML projects involving LangChain, RAG, Flask, React, scikit-learn, and XGBoost.
+
+If {company_name} has an internship opening where analytics, machine learning, dashboards, or data pipelines would be useful, I would be grateful for the chance to share more about my background. If you are not the right person, would you be open to pointing me toward the right recruiter or hiring manager?
+
+Best,
