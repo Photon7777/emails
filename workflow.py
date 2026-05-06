@@ -19,6 +19,7 @@ import db
 from email_template import render_email
 from gmail_client import GmailClient
 from lead import Lead
+from lead_scoring import breakdown_json, score_lead
 
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,16 @@ class ColdEmailWorkflow:
     def init_db(self) -> None:
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
         logger.info("SQLite database is ready at %s", self.settings.database_path)
 
     def fetch_leads(self, max_pages: Optional[int] = None, per_page: Optional[int] = None) -> dict[str, int]:
-        """Fetch leads from Apollo, enrich missing emails, and save to SQLite."""
+        """Discover leads while protecting Apollo credits.
+
+        Apollo search is used with narrow filters, but paid enrichment is only
+        attempted after local duplicate checks, blocklists, scoring, and free
+        email fallbacks have all passed.
+        """
 
         settings = self.settings
         if max_pages is not None or per_page is not None:
@@ -48,11 +55,39 @@ class ColdEmailWorkflow:
         client = ApolloClient(settings)
         raw_people = client.search_people()
 
-        counts = {"inserted": 0, "updated": 0, "skipped_missing_email": 0, "skipped_non_us": 0}
+        counts = {
+            "searched": len(raw_people),
+            "inserted": 0,
+            "updated": 0,
+            "pending": 0,
+            "enriched": 0,
+            "apollo_credits_used": 0,
+            "credit_budget_hit": 0,
+            "skipped_missing_email": 0,
+            "skipped_non_us": 0,
+            "skipped_duplicate": 0,
+            "skipped_blocklist": 0,
+            "rejected_low_score": 0,
+        }
         with db.connect(settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
+            suppression_items = db.read_suppression_list(settings.suppression_list_path)
+            do_not_contact_items = db.read_blocklist(settings.do_not_contact_path)
+            already_contacted_items = db.read_blocklist(settings.already_contacted_path)
+            csv_identity_keys = db.read_csv_identity_keys(settings.leads_csv_path)
+            block_items = suppression_items | do_not_contact_items | already_contacted_items
+            credits_used_today = db.count_apollo_credits_today(conn)
+
             for person in raw_people:
                 lead = client.normalize_person(person)
+                lead.source = "apollo_search"
+                lead.apollo_used = True
+                lead.apollo_credits_used = 0
+                if lead.email:
+                    lead.email_source = "apollo_search"
+                lead.refresh_normalized_fields()
+
                 if not self._lead_is_allowed_by_location(lead):
                     counts["skipped_non_us"] += 1
                     logger.info(
@@ -63,12 +98,90 @@ class ColdEmailWorkflow:
                     )
                     continue
                 self._infer_us_country_from_filters(lead)
+                lead.refresh_normalized_fields()
+
+                if db.lead_matches_blocklist(lead, block_items):
+                    counts["skipped_blocklist"] += 1
+                    logger.info("Skipping blocked lead/company before enrichment: %s at %s", lead.full_name, lead.company_name)
+                    continue
+
+                if db.lead_matches_identity_keys(lead, csv_identity_keys):
+                    counts["skipped_duplicate"] += 1
+                    logger.info("Skipping CSV duplicate before enrichment: %s at %s", lead.full_name, lead.company_name)
+                    continue
+
+                blocking_row = db.blocking_match(conn, lead)
+                if blocking_row:
+                    counts["skipped_duplicate"] += 1
+                    logger.info(
+                        "Skipping duplicate/already-contacted company before enrichment: %s at %s matched row %s with status %s",
+                        lead.full_name or lead.first_name or "unknown",
+                        lead.company_name or "unknown company",
+                        blocking_row["id"],
+                        blocking_row["status"],
+                    )
+                    continue
+
+                existing_row = db.find_existing_lead(conn, lead)
+                if existing_row:
+                    counts["skipped_duplicate"] += 1
+                    lead.notes = f"Duplicate local row {existing_row['id']}; not enriched to save Apollo credits"
+                    action = db.upsert_lead(conn, lead)
+                    counts[action] += 1
+                    logger.info(
+                        "Updated duplicate local lead without Apollo enrichment: %s at %s",
+                        lead.full_name or lead.first_name or "unknown",
+                        lead.company_name or "unknown company",
+                    )
+                    continue
+
+                total_score, score_parts = score_lead(lead, settings)
+                lead.lead_score = total_score
+                lead.score_breakdown = breakdown_json(score_parts)
+
+                if total_score < settings.lead_score_threshold:
+                    lead.status = "rejected"
+                    lead.error_message = f"Lead score {total_score} is below threshold {settings.lead_score_threshold}"
+                    lead.notes = "Rejected before Apollo enrichment to save credits"
+                    counts["rejected_low_score"] += 1
+                    action = db.upsert_lead(conn, lead)
+                    counts[action] += 1
+                    continue
+
+                self._try_free_email_fallbacks(lead)
 
                 if not lead.email and settings.apollo_enrich_missing_emails:
-                    try:
-                        lead = client.enrich_lead(lead)
-                    except Exception as exc:
-                        logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
+                    if settings.apollo_daily_credit_limit >= 0 and credits_used_today >= settings.apollo_daily_credit_limit:
+                        lead.status = "needs_enrichment"
+                        lead.error_message = (
+                            f"Apollo daily credit budget reached "
+                            f"({credits_used_today}/{settings.apollo_daily_credit_limit})"
+                        )
+                        lead.notes = "Queued for a future day instead of spending more Apollo credits"
+                        counts["credit_budget_hit"] += 1
+                    else:
+                        try:
+                            lead = client.enrich_lead(lead)
+                        except Exception as exc:
+                            logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
+                            lead.error_message = str(exc)
+                        finally:
+                            credits_used_today += 1
+                            lead.apollo_credits_used += 1
+                            lead.apollo_used = True
+                            counts["apollo_credits_used"] += 1
+                            counts["enriched"] += 1
+                            db.record_apollo_usage(
+                                conn,
+                                operation="people_match_enrichment",
+                                credits=1,
+                                lead=lead,
+                                notes="Budgeted enrichment after dedupe and scoring",
+                            )
+
+                        if lead.email:
+                            lead.email_source = "apollo_enrichment"
+                        lead.refresh_normalized_fields()
 
                 if not self._lead_is_allowed_by_location(lead):
                     counts["skipped_non_us"] += 1
@@ -80,13 +193,16 @@ class ColdEmailWorkflow:
                     )
                     continue
                 self._infer_us_country_from_filters(lead)
+                lead.refresh_normalized_fields()
 
                 if not lead.email:
-                    lead.status = "skipped"
-                    lead.error_message = "Apollo did not return an email address for this lead"
+                    if lead.status != "needs_enrichment":
+                        lead.status = "needs_email"
+                        lead.error_message = "No reliable email found after free checks and allowed Apollo usage"
                     counts["skipped_missing_email"] += 1
                 else:
                     lead.status = "pending"
+                    counts["pending"] += 1
 
                 action = db.upsert_lead(conn, lead)
                 counts[action] += 1
@@ -94,9 +210,19 @@ class ColdEmailWorkflow:
             db.export_to_csv(conn, settings.leads_csv_path)
 
         logger.info(
-            "Lead fetch complete: %s inserted, %s updated, %s skipped without email, %s skipped non-U.S.",
+            "Lead fetch complete: %s searched, %s inserted, %s updated, %s pending, "
+            "%s enriched, %s Apollo credits used, %s budget hits, %s rejected low score, "
+            "%s duplicates, %s blocklist, %s missing email, %s non-U.S.",
+            counts["searched"],
             counts["inserted"],
             counts["updated"],
+            counts["pending"],
+            counts["enriched"],
+            counts["apollo_credits_used"],
+            counts["credit_budget_hit"],
+            counts["rejected_low_score"],
+            counts["skipped_duplicate"],
+            counts["skipped_blocklist"],
             counts["skipped_missing_email"],
             counts["skipped_non_us"],
         )
@@ -108,6 +234,7 @@ class ColdEmailWorkflow:
 
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
             leads = db.get_pending_leads(conn, limit)
 
         if not leads:
@@ -152,6 +279,7 @@ class ColdEmailWorkflow:
 
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
             sent_today = db.count_sent_today(conn)
             if self.settings.daily_send_limit <= 0:
                 send_limit = limit if limit is not None else 1_000_000
@@ -170,6 +298,9 @@ class ColdEmailWorkflow:
 
             pending_rows = db.get_pending_leads(conn, send_limit)
             suppression_items = db.read_suppression_list(self.settings.suppression_list_path)
+            do_not_contact_items = db.read_blocklist(self.settings.do_not_contact_path)
+            already_contacted_items = db.read_blocklist(self.settings.already_contacted_path)
+            block_items = suppression_items | do_not_contact_items | already_contacted_items
 
             if not pending_rows:
                 logger.info("No pending leads with email addresses are ready to send")
@@ -186,6 +317,16 @@ class ColdEmailWorkflow:
                     counts["skipped"] += 1
                     continue
 
+                if db.lead_matches_blocklist(lead, block_items):
+                    db.mark_skipped(conn, lead_id, "Lead matched do-not-contact or already-contacted list")
+                    counts["skipped"] += 1
+                    continue
+
+                if lead.email_source == "unverified_pattern_guess" and not self.settings.allow_unverified_email_patterns:
+                    db.mark_skipped(conn, lead_id, "Unverified email pattern guesses are disabled")
+                    counts["skipped"] += 1
+                    continue
+
                 if db.email_already_sent(conn, lead.email_lower, lead_id):
                     db.mark_skipped(conn, lead_id, "Duplicate email already sent previously")
                     counts["skipped"] += 1
@@ -193,6 +334,11 @@ class ColdEmailWorkflow:
 
                 if not self._lead_is_allowed_by_location(lead):
                     db.mark_skipped(conn, lead_id, "Contact location is not United States")
+                    counts["skipped"] += 1
+                    continue
+
+                if lead.lead_score and lead.lead_score < self.settings.lead_score_threshold:
+                    db.mark_skipped(conn, lead_id, "Lead score fell below the configured threshold")
                     counts["skipped"] += 1
                     continue
 
@@ -286,17 +432,43 @@ class ColdEmailWorkflow:
         if requested_locations == {"united states"} and not lead.country.strip():
             lead.country = "United States"
 
+    def _try_free_email_fallbacks(self, lead: Lead) -> bool:
+        """Try no-credit email fallbacks before Apollo enrichment.
+
+        The safe default is conservative: we never invent an unverified email
+        unless ALLOW_UNVERIFIED_EMAIL_PATTERNS=true is explicitly set.
+        """
+
+        if lead.email:
+            return True
+        if not self.settings.allow_unverified_email_patterns:
+            return False
+        if not lead.first_name or not lead.last_name or not lead.normalized_domain:
+            return False
+        public_domains = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"}
+        if lead.normalized_domain in public_domains:
+            return False
+        first = lead.first_name.strip().lower().replace(" ", "")
+        last = lead.last_name.strip().lower().replace(" ", "")
+        lead.email = f"{first}.{last}@{lead.normalized_domain}"
+        lead.email_source = "unverified_pattern_guess"
+        lead.notes = "Email guessed from common company pattern; verify before live sending"
+        return True
+
     def export_csv(self) -> None:
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
             db.export_to_csv(conn, self.settings.leads_csv_path)
         logger.info("Exported lead CSV to %s", self.settings.leads_csv_path)
 
     def status_report(self) -> dict[str, int]:
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
+            db.backfill_normalized_keys(conn)
             counts = db.status_counts(conn)
             sent_today = db.count_sent_today(conn)
+            apollo_credits_today = db.count_apollo_credits_today(conn)
 
         print("Lead status counts:")
         if counts:
@@ -308,4 +480,11 @@ class ColdEmailWorkflow:
             print(f"Sent today: {sent_today}/unlimited")
         else:
             print(f"Sent today: {sent_today}/{self.settings.daily_send_limit}")
+        if self.settings.apollo_daily_credit_limit < 0:
+            print(f"Apollo enrichment credits today: {apollo_credits_today}/unlimited")
+        else:
+            print(
+                "Apollo enrichment credits today: "
+                f"{apollo_credits_today}/{self.settings.apollo_daily_credit_limit}"
+            )
         return counts

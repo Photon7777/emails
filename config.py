@@ -70,6 +70,9 @@ class Settings:
     apollo_contact_email_statuses: list[str]
     apollo_enrich_missing_emails: bool
     apollo_reveal_personal_emails: bool
+    apollo_daily_credit_limit: int
+    lead_score_threshold: int
+    allow_unverified_email_patterns: bool
 
     gmail_credentials_file: Path
     gmail_token_file: Path
@@ -98,6 +101,8 @@ class Settings:
     leads_csv_path: Path
     email_preview_path: Path
     suppression_list_path: Path
+    do_not_contact_path: Path
+    already_contacted_path: Path
     log_file: Path
 
 
@@ -128,6 +133,9 @@ def load_settings() -> Settings:
         ),
         apollo_enrich_missing_emails=_get_bool("APOLLO_ENRICH_MISSING_EMAILS", True),
         apollo_reveal_personal_emails=_get_bool("APOLLO_REVEAL_PERSONAL_EMAILS", False),
+        apollo_daily_credit_limit=_get_int("APOLLO_DAILY_CREDIT_LIMIT", 25),
+        lead_score_threshold=_get_int("LEAD_SCORE_THRESHOLD", 70),
+        allow_unverified_email_patterns=_get_bool("ALLOW_UNVERIFIED_EMAIL_PATTERNS", False),
         gmail_credentials_file=_path_from_env("GMAIL_CREDENTIALS_FILE", "credentials.json"),
         gmail_token_file=_path_from_env("GMAIL_TOKEN_FILE", "token.json"),
         sender_name=_get_str("SENDER_NAME"),
@@ -157,6 +165,8 @@ def load_settings() -> Settings:
         leads_csv_path=_path_from_env("LEADS_CSV_PATH", "data/leads_export.csv"),
         email_preview_path=_path_from_env("EMAIL_PREVIEW_PATH", "data/email_previews.txt"),
         suppression_list_path=_path_from_env("SUPPRESSION_LIST_PATH", "data/suppression_list.txt"),
+        do_not_contact_path=_path_from_env("DO_NOT_CONTACT_PATH", "data/do_not_contact.txt"),
+        already_contacted_path=_path_from_env("ALREADY_CONTACTED_PATH", "data/already_contacted.txt"),
         log_file=_path_from_env("LOG_FILE", "logs/cold_email_workflow.log"),
     )
 
@@ -168,6 +178,8 @@ def ensure_local_folders(settings: Settings) -> None:
     settings.leads_csv_path.parent.mkdir(parents=True, exist_ok=True)
     settings.email_preview_path.parent.mkdir(parents=True, exist_ok=True)
     settings.suppression_list_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.do_not_contact_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.already_contacted_path.parent.mkdir(parents=True, exist_ok=True)
     settings.log_file.parent.mkdir(parents=True, exist_ok=True)
 
 

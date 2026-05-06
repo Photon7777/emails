@@ -1,8 +1,10 @@
 # Python Cold Email Workflow for macOS
 
-This project finds U.S.-based recruiter, founder, hiring manager, and company contacts through Apollo, stores leads locally, renders personalized internship/job outreach, and sends messages through the Gmail API.
+This project finds U.S.-based recruiter, founder, hiring manager, and company contacts, stores leads locally, renders personalized internship/job outreach, and sends messages through the Gmail API.
 
 It is designed for a MacBook and a beginner-friendly Python setup. The default config in `.env.example` is safe: `DRY_RUN=true`, so no real outreach is sent until you explicitly switch to live sending.
+
+The workflow is Apollo-credit conscious: it checks local history, CSV exports, blocklists, company/contact duplicates, and lead score before using Apollo enrichment.
 
 ## What Is Not Committed
 
@@ -32,11 +34,14 @@ emails/
   config.py
   logging_setup.py
   lead.py
+  lead_scoring.py
   db.py
   apollo_client.py
   gmail_client.py
   email_template.py
   workflow.py
+  docs/
+    credit_saving_workflow.md
   data/
     .gitkeep
   logs/
@@ -60,6 +65,9 @@ Generated data, previews, logs, credentials, and OAuth tokens are created locall
 - Stores the Apollo API key in `.env`.
 - Uses Gmail API OAuth with `credentials.json` and `token.json`.
 - Searches Apollo by job title, U.S. location, company size, keywords, and industry/company filters.
+- Scores leads before enrichment and only enriches high-fit net-new leads.
+- Applies a daily Apollo enrichment credit budget.
+- Checks SQLite, CSV export, suppression, do-not-contact, and already-contacted lists before paid enrichment.
 - Stores leads in SQLite and exports CSV.
 - Avoids duplicate contacts by email and Apollo ID.
 - Skips contacts without usable email addresses.
@@ -162,6 +170,12 @@ python main.py apollo-test
 
 Note: Apollo People Search may not return email addresses directly for every contact. This project can call People Enrichment for missing emails when `APOLLO_ENRICH_MISSING_EMAILS=true`. Enrichment may consume Apollo credits.
 
+For the full credit-saving design, schema, pseudocode, and automation plan, see:
+
+```text
+docs/credit_saving_workflow.md
+```
+
 ## Lead Filters
 
 The current workflow is intended for U.S.-only internship/job outreach. Use these settings in `.env`:
@@ -174,6 +188,9 @@ APOLLO_FILTER_PERSON_LOCATIONS=United States
 APOLLO_FILTER_LOCATIONS=United States
 APOLLO_FILTER_INDUSTRIES=computer software,financial services,healthcare,analytics
 APOLLO_FILTER_COMPANY_SIZE_RANGES=1,10;11,50;51,200;201,500;501,1000;1001,5000;5001,10000;10001,20000
+APOLLO_DAILY_CREDIT_LIMIT=25
+LEAD_SCORE_THRESHOLD=70
+ALLOW_UNVERIFIED_EMAIL_PATTERNS=false
 ```
 
 `APOLLO_FILTER_JOB_TITLES` describes the people to contact. `APOLLO_TARGET_JOB_TITLES` describes the internship/job roles you are looking for at their companies.
@@ -187,6 +204,14 @@ APOLLO_USE_ORGANIZATION_PREFILTER=true
 ```
 
 That calls Apollo Organization Search first, then searches people at matching companies. Apollo says Organization Search may consume credits.
+
+Credit-saving rules:
+
+- Apollo enrichment happens only after duplicate checks and scoring.
+- Companies already sent, rejected, bounced, unsubscribed, or marked not relevant are skipped.
+- The sender only sends `pending` leads with emails.
+- `needs_enrichment` means the lead was good enough but the daily Apollo credit budget was already reached.
+- `needs_email` means no reliable email was found within the allowed budget.
 
 ## Resume Attachment
 
@@ -296,6 +321,8 @@ DRY_RUN=true
 DAILY_SEND_LIMIT=20
 DELAY_BETWEEN_EMAILS_SECONDS=45
 MAX_RETRIES=3
+APOLLO_DAILY_CREDIT_LIMIT=25
+LEAD_SCORE_THRESHOLD=70
 ```
 
 Useful values:
@@ -305,6 +332,8 @@ Useful values:
 - `DAILY_SEND_LIMIT=0`: no daily cap, sends all pending contacts.
 - `DELAY_BETWEEN_EMAILS_SECONDS=45`: waits between sends.
 - `MAX_RETRIES=3`: retries transient Gmail/API failures.
+- `APOLLO_DAILY_CREDIT_LIMIT=25`: caps daily Apollo enrichment attempts.
+- `LEAD_SCORE_THRESHOLD=70`: rejects low-fit leads before enrichment.
 
 ## Suppression List
 
@@ -322,6 +351,15 @@ example.com
 ```
 
 The workflow skips suppressed emails and domains before sending.
+
+Use these local files to save credits and avoid repeat outreach:
+
+```text
+data/do_not_contact.txt
+data/already_contacted.txt
+```
+
+Each file accepts emails, domains, normalized company names, or LinkedIn URLs, one per line. Any match is skipped before Apollo enrichment.
 
 ## macOS launchd Setup
 
