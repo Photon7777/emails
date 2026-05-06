@@ -209,7 +209,9 @@ Credit-saving rules:
 
 - Apollo enrichment happens only after duplicate checks and scoring.
 - Companies already sent, rejected, bounced, unsubscribed, or marked not relevant are skipped.
+- Work-email domains must match the company domain before sending.
 - The sender only sends `pending` leads with emails.
+- Run `python main.py rescore` after changing scoring rules to clean an older pending queue.
 - `needs_enrichment` means the lead was good enough but the daily Apollo credit budget was already reached.
 - `needs_email` means no reliable email was found within the allowed budget.
 
@@ -273,6 +275,7 @@ python main.py apollo-test
 python main.py fetch-leads --max-pages 1 --per-page 5
 python main.py status
 python main.py preview --limit 3
+python main.py rescore
 python main.py send --dry-run --limit 2
 ```
 

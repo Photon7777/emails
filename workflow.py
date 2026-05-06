@@ -200,6 +200,11 @@ class ColdEmailWorkflow:
                         lead.status = "needs_email"
                         lead.error_message = "No reliable email found after free checks and allowed Apollo usage"
                     counts["skipped_missing_email"] += 1
+                elif not self._email_domain_matches_company(lead):
+                    lead.status = "needs_email"
+                    lead.error_message = "Email domain does not match company domain"
+                    lead.notes = "Held back before sending because contact email appears to belong to another company"
+                    counts["skipped_missing_email"] += 1
                 else:
                     lead.status = "pending"
                     counts["pending"] += 1
@@ -342,6 +347,11 @@ class ColdEmailWorkflow:
                     counts["skipped"] += 1
                     continue
 
+                if not self._email_domain_matches_company(lead):
+                    db.mark_skipped(conn, lead_id, "Email domain does not match company domain")
+                    counts["skipped"] += 1
+                    continue
+
                 subject, body = render_email(lead, self.settings)
 
                 if dry_run:
@@ -408,6 +418,114 @@ class ColdEmailWorkflow:
         message_id = gmail.send_email(to_email, subject, body, attachment_paths=attachment_paths)
         logger.info("Sent Gmail test message %s to %s", message_id, to_email)
 
+    def rescore_existing_leads(self) -> dict[str, int]:
+        """Apply the current quality gates to already-queued leads."""
+
+        counts = {"rescored": 0, "rejected": 0, "blocked": 0, "duplicate_pending": 0}
+        with db.connect(self.settings.database_path) as conn:
+            db.init_db(conn)
+            db.backfill_normalized_keys(conn)
+            suppression_items = db.read_suppression_list(self.settings.suppression_list_path)
+            do_not_contact_items = db.read_blocklist(self.settings.do_not_contact_path)
+            already_contacted_items = db.read_blocklist(self.settings.already_contacted_path)
+            block_items = suppression_items | do_not_contact_items | already_contacted_items
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM leads
+                WHERE status IN ('pending', 'needs_email', 'needs_enrichment')
+                ORDER BY lead_score DESC, created_at ASC, id ASC
+                """
+            ).fetchall()
+
+            pending_candidates = []
+            for row in rows:
+                lead = Lead.from_row(row)
+                lead.refresh_normalized_fields()
+                score, parts = score_lead(lead, self.settings)
+                score_json = breakdown_json(parts)
+                counts["rescored"] += 1
+
+                if db.lead_matches_blocklist(lead, block_items):
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="skipped",
+                        error_message="Matched do-not-contact or already-contacted list during rescore",
+                        notes="Removed from pending queue before send",
+                    )
+                    counts["blocked"] += 1
+                    continue
+
+                blocking_row = db.blocking_match(conn, lead)
+                if blocking_row and blocking_row["id"] != row["id"]:
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="skipped",
+                        error_message=f"Company/contact already blocked by row {blocking_row['id']}",
+                        notes="Removed from pending queue before send",
+                    )
+                    counts["blocked"] += 1
+                    continue
+
+                if score < self.settings.lead_score_threshold:
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="rejected",
+                        error_message=(
+                            f"Lead score {score} is below threshold "
+                            f"{self.settings.lead_score_threshold}"
+                        ),
+                        notes="Rejected by current scoring model before send",
+                    )
+                    counts["rejected"] += 1
+                    continue
+
+                if lead.email and not self._email_domain_matches_company(lead):
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="skipped",
+                        error_message="Email domain does not match company domain",
+                        notes="Removed from pending queue before send",
+                    )
+                    counts["blocked"] += 1
+                    continue
+
+                db.update_lead_quality(conn, row["id"], score, score_json)
+                pending_candidates.append((row["id"], lead, score))
+
+            seen_company_keys = set()
+            for lead_id, lead, score in sorted(pending_candidates, key=lambda item: item[2], reverse=True):
+                key = lead.normalized_domain or lead.normalized_company_name
+                if not key:
+                    continue
+                if key in seen_company_keys:
+                    db.mark_skipped(conn, lead_id, "Duplicate pending company; kept the highest-scoring contact")
+                    counts["duplicate_pending"] += 1
+                    continue
+                seen_company_keys.add(key)
+
+        logger.info(
+            "Rescore complete: %s rescored, %s rejected, %s blocked, %s duplicate pending skipped",
+            counts["rescored"],
+            counts["rejected"],
+            counts["blocked"],
+            counts["duplicate_pending"],
+        )
+        return counts
+
     def _attachment_paths(self) -> list:
         if not self.settings.attach_resume:
             return []
@@ -431,6 +549,22 @@ class ColdEmailWorkflow:
         requested_locations = {item.strip().lower() for item in self.settings.apollo_person_locations}
         if requested_locations == {"united states"} and not lead.country.strip():
             lead.country = "United States"
+
+    def _email_domain_matches_company(self, lead: Lead) -> bool:
+        if not lead.email or not lead.normalized_domain:
+            return True
+        email_domain = lead.email_lower.split("@")[-1] if "@" in lead.email_lower else ""
+        if not email_domain:
+            return False
+        public_domains = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"}
+        if email_domain in public_domains:
+            return True
+        company_domain = lead.normalized_domain
+        return (
+            email_domain == company_domain
+            or email_domain.endswith(f".{company_domain}")
+            or company_domain.endswith(f".{email_domain}")
+        )
 
     def _try_free_email_fallbacks(self, lead: Lead) -> bool:
         """Try no-credit email fallbacks before Apollo enrichment.

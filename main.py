@@ -72,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--limit", type=int, help="Maximum emails to send in this run.")
 
     subparsers.add_parser("export-csv", help="Export SQLite leads to CSV.")
+    subparsers.add_parser("rescore", help="Apply current scoring/dedupe gates to existing queued leads.")
     subparsers.add_parser("status", help="Print status counts and today's send count.")
     return parser
 
@@ -120,6 +121,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             workflow.status_report()
         elif args.command == "export-csv":
             workflow.export_csv()
+        elif args.command == "rescore":
+            counts = workflow.rescore_existing_leads()
+            print(counts)
         elif args.command == "status":
             workflow.status_report()
         else:

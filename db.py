@@ -537,6 +537,45 @@ def mark_skipped(conn: sqlite3.Connection, lead_id: int, reason: str) -> None:
     conn.commit()
 
 
+def update_lead_quality(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    lead_score: int,
+    score_breakdown: str,
+    status: Optional[str] = None,
+    error_message: str = "",
+    notes: str = "",
+) -> None:
+    now = utc_now_iso()
+    if status:
+        conn.execute(
+            """
+            UPDATE leads
+            SET lead_score = ?,
+                score_breakdown = ?,
+                status = ?,
+                error_message = ?,
+                notes = COALESCE(NULLIF(?, ''), notes),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (lead_score, score_breakdown, status, error_message[:1000], notes, now, lead_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE leads
+            SET lead_score = ?,
+                score_breakdown = ?,
+                notes = COALESCE(NULLIF(?, ''), notes),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (lead_score, score_breakdown, notes, now, lead_id),
+        )
+    conn.commit()
+
+
 def email_already_sent(conn: sqlite3.Connection, email_lower: str, current_id: int) -> bool:
     row = conn.execute(
         """

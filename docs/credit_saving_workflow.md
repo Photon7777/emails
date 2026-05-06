@@ -54,7 +54,7 @@ Outreach queue
    - sent, rejected, bounced, not relevant, or unsubscribed rows
 6. Score remaining candidates from 0 to 100.
 7. Reject low-fit candidates before any enrichment.
-8. If the lead already has a reliable email from search or local data, queue it as `pending`.
+8. If the lead already has a reliable email from search or local data, confirm the work email domain matches the company domain, then queue it as `pending`.
 9. If the lead has no email, use Apollo enrichment only when:
    - the company/contact score passes the threshold
    - the company has not been contacted
@@ -62,6 +62,14 @@ Outreach queue
    - the daily Apollo credit budget is not exhausted
 10. Save fresh previews.
 11. The morning sender sends only `pending` leads with emails through Gmail API.
+
+When scoring rules change, run:
+
+```bash
+python main.py rescore
+```
+
+This applies the current score threshold, duplicate-company rules, and blocklists to older queued leads before the next sender run.
 
 ## Python Implementation Approach
 
@@ -190,6 +198,7 @@ Apollo enrichment is skipped for:
 - low-score leads
 - non-U.S. contacts
 - contacts with irrelevant titles
+- work emails that do not match the company domain
 
 ## Daily Credit Budgeting
 
@@ -336,6 +345,7 @@ The 9:00 PM job:
 The 8:00 AM job:
 
 - sends only `pending` leads
+- assumes older queues were cleaned with `python main.py rescore` after scoring changes
 - respects Gmail settings and delay controls
 - attaches the configured resume
 - logs each result
