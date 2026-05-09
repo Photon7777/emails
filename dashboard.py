@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -15,6 +16,23 @@ from email_template import render_email
 from lead import Lead, utc_now_iso
 
 
+def apply_streamlit_secrets_to_env() -> None:
+    """Let Streamlit Cloud secrets behave like local .env variables."""
+
+    try:
+        secrets = st.secrets
+    except Exception:
+        return
+    try:
+        secret_items = secrets.items()
+    except Exception:
+        return
+    for key, value in secret_items:
+        if isinstance(value, (str, int, float, bool)):
+            os.environ.setdefault(str(key), str(value))
+
+
+apply_streamlit_secrets_to_env()
 settings = load_settings()
 
 
