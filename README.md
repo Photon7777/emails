@@ -1,6 +1,6 @@
 # Python Cold Email Workflow for macOS
 
-This project finds U.S.-based recruiter, founder, hiring manager, and company contacts, stores leads locally, renders personalized internship/job outreach, and sends messages through the Gmail API.
+This project finds DMV-area and remote recruiter, founder, hiring manager, and company contacts, stores leads locally, renders personalized internship outreach, and sends messages through the Gmail API.
 
 It is designed for a MacBook and a beginner-friendly Python setup. The default config in `.env.example` is safe: `DRY_RUN=true`, so no real outreach is sent until you explicitly switch to live sending.
 
@@ -34,12 +34,17 @@ emails/
   config.py
   logging_setup.py
   lead.py
+  dmv_location.py
+  search_tiers.py
   lead_scoring.py
   db.py
   apollo_client.py
   gmail_client.py
   email_template.py
   workflow.py
+  run_discovery.py
+  run_sender.py
+  dashboard.py
   docs/
     credit_saving_workflow.md
   data/
@@ -64,19 +69,23 @@ Generated data, previews, logs, credentials, and OAuth tokens are created locall
 - Uses Python on macOS.
 - Stores the Apollo API key in `.env`.
 - Uses Gmail API OAuth with `credentials.json` and `token.json`.
-- Searches Apollo by job title, U.S. location, company size, keywords, and industry/company filters.
+- Searches Apollo by job title, DMV/remote location, company size, keywords, and industry/company filters.
+- Filters every candidate to Washington DC, Maryland, Virginia, or remote roles before enrichment or sending.
 - Scores leads before enrichment and only enriches high-fit net-new leads.
 - Applies a daily Apollo enrichment credit budget.
 - Checks SQLite, CSV export, suppression, do-not-contact, and already-contacted lists before paid enrichment.
 - Stores leads in SQLite and exports CSV.
 - Avoids duplicate contacts by email and Apollo ID.
 - Skips contacts without usable email addresses.
-- Tracks each lead as `pending`, `sent`, `failed`, or `skipped`.
+- Uses tiered Apollo fallback search when strict DMV filters return too few candidates.
+- Tracks each lead as `raw`, `rejected`, `enriched`, `send_ready`, `sent`, `failed`, or `skipped`.
+- Records `automation_runs`, `email_events`, and Apollo tier debug logs in SQLite.
+- Includes a local Streamlit dashboard: InternReach AI Dashboard.
 - Generates personalized emails using first name, company, role, industry, and company-specific reason.
-- Includes sender identity and unsubscribe text in every email.
+- Includes sender identity in every email.
 - Supports resume PDF attachments.
 - Applies daily limits, delays, retries, error handling, and logging.
-- Supports split scheduling: discover leads at 9:00 PM and send pending emails at 8:00 AM.
+- Supports split scheduling: discover leads at 9:00 PM and dry-run the sender at 8:00 AM.
 
 ## Install
 
@@ -176,24 +185,34 @@ For the full credit-saving design, schema, pseudocode, and automation plan, see:
 docs/credit_saving_workflow.md
 ```
 
-## Lead Filters
+## DMV Internship Lead Filters
 
-The current workflow is intended for U.S.-only internship/job outreach. Use these settings in `.env`:
+The current workflow is intended for DMV-only internship outreach plus remote roles. Use these settings in `.env`:
 
 ```bash
 APOLLO_FILTER_JOB_TITLES=University Recruiter,Campus Recruiter,Early Talent Recruiter,Technical Recruiter,Recruiter,Talent Acquisition Specialist,Founder,Co-Founder,Hiring Manager,Data Analytics Manager,Data Science Manager,Machine Learning Manager,AI Engineering Manager,Head of Data,Director of Analytics
-APOLLO_TARGET_JOB_TITLES=data analyst intern,AI engineer intern,data analytics intern,machine learning intern,data science intern
-APOLLO_TARGET_JOB_LOCATIONS=United States
-APOLLO_FILTER_PERSON_LOCATIONS=United States
-APOLLO_FILTER_LOCATIONS=United States
+APOLLO_TARGET_JOB_TITLES=Data Analyst Intern,Data Scientist Intern,Data Engineer Intern,Business Analyst Intern,Analytics Intern,BI Intern,AI/ML Intern,Cloud/Data Intern
+APOLLO_TARGET_JOB_LOCATIONS=Washington DC,District of Columbia,DC,Maryland,MD,Virginia,VA,Remote
+APOLLO_FILTER_PERSON_LOCATIONS=Washington DC,Maryland,Virginia
+APOLLO_FILTER_LOCATIONS=Washington DC,District of Columbia,Maryland,Virginia,Arlington,Alexandria,Fairfax,Tysons,Reston,Rockville,Bethesda,College Park,Silver Spring,Baltimore,Gaithersburg,Richmond
 APOLLO_FILTER_INDUSTRIES=computer software,financial services,healthcare,analytics
+APOLLO_FILTER_KEYWORDS=summer 2026 internship,data analyst,business analyst,analytics,AI,ML,cloud,data engineering
 APOLLO_FILTER_COMPANY_SIZE_RANGES=1,10;11,50;51,200;201,500;501,1000;1001,5000;5001,10000;10001,20000
 APOLLO_DAILY_CREDIT_LIMIT=25
+DAILY_ENRICH_LIMIT=25
 LEAD_SCORE_THRESHOLD=70
+MIN_SCORE_TO_ENRICH=55
+MIN_SCORE_TO_SEND=70
+MAX_CONTACTS_PER_COMPANY_PER_WEEK=2
 ALLOW_UNVERIFIED_EMAIL_PATTERNS=false
+DAILY_SEND_LIMIT=30
+DAILY_SEND_TARGET_MIN=25
+PENDING_INVENTORY_TARGET=40
 ```
 
 `APOLLO_FILTER_JOB_TITLES` describes the people to contact. `APOLLO_TARGET_JOB_TITLES` describes the internship/job roles you are looking for at their companies.
+
+Local DMV filtering also normalizes common variants such as `DC`, `District of Columbia`, `MD`, `Maryland`, `VA`, `Virginia`, `Arlington`, `Alexandria`, `Fairfax`, `Tysons`, `Reston`, `Rockville`, `Bethesda`, `College Park`, `Silver Spring`, `Baltimore`, `Gaithersburg`, and `Richmond`. Non-DMV leads are skipped before Apollo enrichment and before Gmail sending.
 
 Company size ranges use semicolons because each Apollo range contains a comma.
 
@@ -208,12 +227,14 @@ That calls Apollo Organization Search first, then searches people at matching co
 Credit-saving rules:
 
 - Apollo enrichment happens only after duplicate checks and scoring.
+- Apollo enrichment is allowed only for DMV or remote-eligible leads.
 - Companies already sent, rejected, bounced, unsubscribed, or marked not relevant are skipped.
 - Work-email domains must match the company domain before sending.
-- The sender only sends `pending` leads with emails.
-- Run `python main.py rescore` after changing scoring rules to clean an older pending queue.
-- `needs_enrichment` means the lead was good enough but the daily Apollo credit budget was already reached.
-- `needs_email` means no reliable email was found within the allowed budget.
+- The sender only sends `send_ready` leads with emails.
+- Run `python main.py rescore` after changing scoring rules to clean an older queue.
+- `raw` can mean the lead passed early checks but enrichment was deferred by the daily credit budget.
+- `rejected` records why a lead was held back, such as low score or missing email after enrichment.
+- The morning sender is tuned for 25-30 emails/day when enough qualified DMV leads are send-ready. It will not bypass DMV, duplicate, score, suppression, or email-domain checks just to hit the target.
 
 ## Resume Attachment
 
@@ -253,13 +274,23 @@ Available placeholders:
 {sender_name}
 {sender_email}
 {sender_role}
-{sender_location}
 {sender_linkedin}
 {sender_portfolio}
 {sender_background}
 ```
 
-The code automatically appends sender identity and unsubscribe text to every email.
+The code automatically appends sender identity to every email.
+
+## Tiered Discovery
+
+Discovery runs four Apollo search tiers and stops once enough unique candidates are found:
+
+1. Strict DMV + remote internship wording.
+2. DMV companies with broader data, AI, BI, Python, SQL, cloud, and automation signals.
+3. Remote U.S. internships with the same internship/data/AI keyword set.
+4. Company-first warm search for fintech, healthcare tech, SaaS, AI, consulting, analytics, edtech, and cloud companies.
+
+Apollo enrichment is never automatic for every search result. The workflow first dedupes locally, checks blocklists and company weekly limits, scores the raw lead, and only enriches missing emails when `score >= MIN_SCORE_TO_ENRICH`.
 
 ## Manual Test Commands
 
@@ -272,11 +303,11 @@ source .venv/bin/activate
 python main.py init-db
 python main.py gmail-auth
 python main.py apollo-test
-python main.py fetch-leads --max-pages 1 --per-page 5
+python run_discovery.py
 python main.py status
 python main.py preview --limit 3
 python main.py rescore
-python main.py send --dry-run --limit 2
+python run_sender.py
 ```
 
 Preview output is saved locally at:
@@ -288,13 +319,13 @@ data/email_previews.txt
 Send one test email to yourself:
 
 ```bash
-python main.py send-test --to your.email@gmail.com --live
+python main.py send-test --to your.email@gmail.com --dry-run
 ```
 
-Send one real pending outreach email only after reviewing previews:
+Send live outreach only after reviewing previews:
 
 ```bash
-python main.py send --live --limit 1
+LIVE_SEND_CONFIRM=I_UNDERSTAND_SEND_LIVE_EMAILS python run_sender.py --live
 ```
 
 Run nightly discovery manually:
@@ -315,28 +346,68 @@ Run the full workflow live:
 python main.py run --live --limit 2
 ```
 
+Open the dashboard:
+
+```bash
+streamlit run dashboard.py
+```
+
+Use the dashboard sidebar item `Daily Review` after the 9 PM discovery job runs. It shows contacts found that day, the explicit 8 AM send queue, email previews, rejection reasons, Apollo tier metadata, and safe review buttons that only update the local database.
+
+## Deploying the Dashboard
+
+The dashboard entry point is:
+
+```text
+dashboard.py
+```
+
+For Streamlit Community Cloud:
+
+1. Push this repo to GitHub.
+2. Create a new Streamlit app from the repo.
+3. Set the main file path to `dashboard.py`.
+4. Add required secrets/settings in the Streamlit secrets manager instead of committing `.env`.
+5. Keep `credentials.json`, `token.json`, `.env`, `data/`, `logs/`, and resume PDFs private.
+
+Important: the current dashboard reads from the local SQLite database at `DATABASE_PATH`. A cloud-hosted dashboard will not automatically see the SQLite database on your MacBook. To view live production analytics from anywhere, use one of these options:
+
+- Host Streamlit on your Mac and access it through a private tunnel such as Tailscale or ngrok.
+- Move workflow storage from local SQLite to a cloud database, then point both the Mac automation and deployed dashboard at that database.
+- Periodically sync a sanitized SQLite/CSV snapshot to the deployment.
+
+The safest current setup is local Streamlit plus private tunnel because it keeps Gmail tokens, Apollo keys, and lead data on your machine.
+
 ## Sending Controls
 
 In `.env`:
 
 ```bash
 DRY_RUN=true
-DAILY_SEND_LIMIT=20
-DELAY_BETWEEN_EMAILS_SECONDS=45
+DAILY_SEND_LIMIT=30
+DAILY_SEND_TARGET_MIN=25
+PENDING_INVENTORY_TARGET=40
+DELAY_BETWEEN_EMAILS_SECONDS=10
 MAX_RETRIES=3
 APOLLO_DAILY_CREDIT_LIMIT=25
-LEAD_SCORE_THRESHOLD=70
+DAILY_ENRICH_LIMIT=25
+MIN_SCORE_TO_ENRICH=55
+MIN_SCORE_TO_SEND=70
+MAX_CONTACTS_PER_COMPANY_PER_WEEK=2
 ```
 
 Useful values:
 
 - `DRY_RUN=true`: preview/log only.
-- `DRY_RUN=false`: allow scheduled jobs to send live email.
-- `DAILY_SEND_LIMIT=0`: no daily cap, sends all pending contacts.
+- `DRY_RUN=false`: allows live sending only when the sender is explicitly run live.
+- `DAILY_SEND_LIMIT=30`: caps live sends per day.
+- `DAILY_SEND_TARGET_MIN=25`: logs a warning if too few send-ready leads exist.
 - `DELAY_BETWEEN_EMAILS_SECONDS=45`: waits between sends.
 - `MAX_RETRIES=3`: retries transient Gmail/API failures.
-- `APOLLO_DAILY_CREDIT_LIMIT=25`: caps daily Apollo enrichment attempts.
-- `LEAD_SCORE_THRESHOLD=70`: rejects low-fit leads before enrichment.
+- `DAILY_ENRICH_LIMIT=25`: caps daily Apollo enrichment attempts.
+- `MIN_SCORE_TO_ENRICH=55`: prevents Apollo credits being spent on weak leads.
+- `MIN_SCORE_TO_SEND=70`: only makes high-fit leads send-ready.
+- `MAX_CONTACTS_PER_COMPANY_PER_WEEK=2`: avoids over-contacting the same company.
 
 ## Suppression List
 
@@ -369,9 +440,9 @@ Each file accepts emails, domains, normalized company names, or LinkedIn URLs, o
 The current schedule uses two launchd jobs:
 
 - `com.sai.cold-email-discover`: runs every night at 9:00 PM.
-- `com.sai.cold-email-send`: sends pending emails every morning at 8:00 AM.
+- `com.sai.cold-email-send`: dry-runs the sender every morning at 8:00 AM by default.
 
-The discovery job fetches Apollo leads, exports CSV, and writes previews. The send job sends pending emails through Gmail API and attaches the resume when `ATTACH_RESUME=true`.
+The discovery job fetches Apollo leads, exports CSV, and writes previews. The send job now uses `run_sender.py`, which defaults to dry-run. Live sending requires explicit confirmation.
 
 For this Mac, the checked-in plists point to:
 
@@ -445,6 +516,8 @@ Run the sender immediately for a test:
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.sai.cold-email-send
 ```
+
+Because the launchd sender uses dry-run by default, this test will not send live email unless you intentionally edit the runtime sender command and set live confirmation.
 
 Check registration:
 

@@ -15,5 +15,5 @@ else
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting nightly lead discovery"
-"$PYTHON" main.py discover >> logs/discover.log 2>&1
+"$PYTHON" run_discovery.py >> logs/discover.log 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Finished nightly lead discovery"

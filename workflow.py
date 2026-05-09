@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import time
@@ -16,6 +17,7 @@ from config import (
     validate_sender_settings,
 )
 import db
+from dmv_location import apply_dmv_location
 from email_template import render_email
 from gmail_client import GmailClient
 from lead import Lead
@@ -52,184 +54,274 @@ class ColdEmailWorkflow:
                 apollo_fetch_per_page=per_page or self.settings.apollo_fetch_per_page,
             )
 
-        client = ApolloClient(settings)
-        raw_people = client.search_people()
-
         counts = {
-            "searched": len(raw_people),
+            "searched": 0,
             "inserted": 0,
             "updated": 0,
-            "pending": 0,
+            "send_ready": 0,
+            "queued": 0,
             "enriched": 0,
             "apollo_credits_used": 0,
             "credit_budget_hit": 0,
             "skipped_missing_email": 0,
-            "skipped_non_us": 0,
+            "skipped_non_dmv": 0,
             "skipped_duplicate": 0,
             "skipped_blocklist": 0,
+            "skipped_company_limit": 0,
             "rejected_low_score": 0,
+            "rejected_below_send_score": 0,
         }
         with db.connect(settings.database_path) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
+            run_id = db.start_automation_run(
+                conn,
+                "discovery",
+                details={
+                    "dry_run": settings.dry_run,
+                    "min_score_to_enrich": settings.min_score_to_enrich,
+                    "min_score_to_send": settings.min_score_to_send,
+                    "daily_enrich_limit": settings.apollo_daily_credit_limit,
+                },
+            )
             suppression_items = db.read_suppression_list(settings.suppression_list_path)
             do_not_contact_items = db.read_blocklist(settings.do_not_contact_path)
             already_contacted_items = db.read_blocklist(settings.already_contacted_path)
             csv_identity_keys = db.read_csv_identity_keys(settings.leads_csv_path)
             block_items = suppression_items | do_not_contact_items | already_contacted_items
             credits_used_today = db.count_apollo_credits_today(conn)
+            scheduled_send_time = self._next_morning_send_time()
 
-            for person in raw_people:
-                lead = client.normalize_person(person)
-                lead.source = "apollo_search"
-                lead.apollo_used = True
-                lead.apollo_credits_used = 0
-                if lead.email:
-                    lead.email_source = "apollo_search"
-                lead.refresh_normalized_fields()
-
-                if not self._lead_is_allowed_by_location(lead):
-                    counts["skipped_non_us"] += 1
-                    logger.info(
-                        "Skipping non-U.S. lead before storage/enrichment: %s at %s (%s)",
-                        lead.full_name or lead.first_name or "unknown",
-                        lead.company_name or "unknown company",
-                        lead.country or "unknown country",
+            try:
+                client = ApolloClient(settings)
+                raw_people = client.search_people(
+                    target_count=max(
+                        settings.pending_inventory_target,
+                        settings.daily_send_target_min,
+                        settings.daily_send_limit,
                     )
-                    continue
-                self._infer_us_country_from_filters(lead)
-                lead.refresh_normalized_fields()
+                )
+                counts["searched"] = len(raw_people)
+                db.record_search_logs(conn, run_id, client.search_debug)
 
-                if db.lead_matches_blocklist(lead, block_items):
-                    counts["skipped_blocklist"] += 1
-                    logger.info("Skipping blocked lead/company before enrichment: %s at %s", lead.full_name, lead.company_name)
-                    continue
+                for person in raw_people:
+                    lead = client.normalize_person(person)
+                    lead.source = "apollo_search"
+                    lead.discovery_run_id = run_id
+                    lead.search_tier = lead.source_tier
+                    lead.apollo_used = False
+                    lead.apollo_credits_used = 0
+                    if lead.email:
+                        lead.email_source = "apollo_search"
+                    lead.refresh_normalized_fields()
+                    apply_dmv_location(lead)
 
-                if db.lead_matches_identity_keys(lead, csv_identity_keys):
-                    counts["skipped_duplicate"] += 1
-                    logger.info("Skipping CSV duplicate before enrichment: %s at %s", lead.full_name, lead.company_name)
-                    continue
-
-                blocking_row = db.blocking_match(conn, lead)
-                if blocking_row:
-                    counts["skipped_duplicate"] += 1
-                    logger.info(
-                        "Skipping duplicate/already-contacted company before enrichment: %s at %s matched row %s with status %s",
-                        lead.full_name or lead.first_name or "unknown",
-                        lead.company_name or "unknown company",
-                        blocking_row["id"],
-                        blocking_row["status"],
-                    )
-                    continue
-
-                existing_row = db.find_existing_lead(conn, lead)
-                if existing_row:
-                    counts["skipped_duplicate"] += 1
-                    lead.notes = f"Duplicate local row {existing_row['id']}; not enriched to save Apollo credits"
-                    action = db.upsert_lead(conn, lead)
-                    counts[action] += 1
-                    logger.info(
-                        "Updated duplicate local lead without Apollo enrichment: %s at %s",
-                        lead.full_name or lead.first_name or "unknown",
-                        lead.company_name or "unknown company",
-                    )
-                    continue
-
-                total_score, score_parts = score_lead(lead, settings)
-                lead.lead_score = total_score
-                lead.score_breakdown = breakdown_json(score_parts)
-
-                if total_score < settings.lead_score_threshold:
-                    lead.status = "rejected"
-                    lead.error_message = f"Lead score {total_score} is below threshold {settings.lead_score_threshold}"
-                    lead.notes = "Rejected before Apollo enrichment to save credits"
-                    counts["rejected_low_score"] += 1
-                    action = db.upsert_lead(conn, lead)
-                    counts[action] += 1
-                    continue
-
-                self._try_free_email_fallbacks(lead)
-
-                if not lead.email and settings.apollo_enrich_missing_emails:
-                    if settings.apollo_daily_credit_limit >= 0 and credits_used_today >= settings.apollo_daily_credit_limit:
-                        lead.status = "needs_enrichment"
-                        lead.error_message = (
-                            f"Apollo daily credit budget reached "
-                            f"({credits_used_today}/{settings.apollo_daily_credit_limit})"
+                    if not self._lead_is_allowed_by_location(lead):
+                        counts["skipped_non_dmv"] += 1
+                        lead.status = "skipped"
+                        lead.rejection_reason = "Outside DMV and not remote"
+                        lead.error_message = lead.rejection_reason
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        logger.info(
+                            "Skipping non-DMV/non-remote lead before enrichment: %s at %s (%s)",
+                            lead.full_name or lead.first_name or "unknown",
+                            lead.company_name or "unknown company",
+                            lead.location_match or lead.country or "unknown location",
                         )
-                        lead.notes = "Queued for a future day instead of spending more Apollo credits"
-                        counts["credit_budget_hit"] += 1
-                    else:
-                        try:
-                            lead = client.enrich_lead(lead)
-                        except Exception as exc:
-                            logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
-                            lead.error_message = str(exc)
-                        finally:
-                            credits_used_today += 1
-                            lead.apollo_credits_used += 1
-                            lead.apollo_used = True
-                            counts["apollo_credits_used"] += 1
-                            counts["enriched"] += 1
-                            db.record_apollo_usage(
-                                conn,
-                                operation="people_match_enrichment",
-                                credits=1,
-                                lead=lead,
-                                notes="Budgeted enrichment after dedupe and scoring",
+                        continue
+                    lead.refresh_normalized_fields()
+
+                    if db.lead_matches_blocklist(lead, block_items):
+                        counts["skipped_blocklist"] += 1
+                        lead.status = "skipped"
+                        lead.rejection_reason = "Lead matched do-not-contact, already-contacted, or suppression list"
+                        lead.error_message = lead.rejection_reason
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        logger.info("Skipping blocked lead/company before enrichment: %s at %s", lead.full_name, lead.company_name)
+                        continue
+
+                    if db.lead_matches_identity_keys(lead, csv_identity_keys):
+                        counts["skipped_duplicate"] += 1
+                        lead.status = "skipped"
+                        lead.rejection_reason = "Duplicate contact from local CSV/export"
+                        lead.error_message = lead.rejection_reason
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        logger.info("Skipping CSV duplicate before enrichment: %s at %s", lead.full_name, lead.company_name)
+                        continue
+
+                    if db.company_contact_count_this_week(conn, lead) >= settings.max_contacts_per_company_per_week:
+                        counts["skipped_company_limit"] += 1
+                        lead.status = "skipped"
+                        lead.rejection_reason = "Company weekly contact limit reached"
+                        lead.error_message = lead.rejection_reason
+                        lead.notes = "Skipped before enrichment to avoid over-contacting one company"
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        continue
+
+                    blocking_row = db.blocking_match(conn, lead)
+                    if blocking_row:
+                        counts["skipped_duplicate"] += 1
+                        logger.info(
+                            "Skipping duplicate/already-contacted person before enrichment: %s at %s matched row %s with status %s",
+                            lead.full_name or lead.first_name or "unknown",
+                            lead.company_name or "unknown company",
+                            blocking_row["id"],
+                            blocking_row["status"],
+                        )
+                        continue
+
+                    existing_row = db.find_existing_lead(conn, lead)
+                    if existing_row:
+                        counts["skipped_duplicate"] += 1
+                        lead.notes = f"Duplicate local person row {existing_row['id']}; not enriched to save Apollo credits"
+                        lead.status = "skipped"
+                        lead.rejection_reason = "Duplicate local person"
+                        lead.error_message = lead.rejection_reason
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        continue
+
+                    total_score, score_parts = score_lead(lead, settings)
+                    lead.lead_score = total_score
+                    lead.score_breakdown = breakdown_json(score_parts)
+
+                    if total_score < settings.min_score_to_enrich:
+                        lead.status = "rejected"
+                        lead.rejection_reason = (
+                            f"Lead score {total_score} is below enrichment threshold "
+                            f"{settings.min_score_to_enrich}"
+                        )
+                        lead.error_message = lead.rejection_reason
+                        lead.notes = "Rejected before Apollo enrichment to save credits"
+                        counts["rejected_low_score"] += 1
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        continue
+
+                    self._try_free_email_fallbacks(lead)
+
+                    if not lead.email and settings.apollo_enrich_missing_emails:
+                        if settings.apollo_daily_credit_limit >= 0 and credits_used_today >= settings.apollo_daily_credit_limit:
+                            lead.status = "raw"
+                            lead.rejection_reason = (
+                                f"Apollo daily enrichment budget reached "
+                                f"({credits_used_today}/{settings.apollo_daily_credit_limit})"
                             )
+                            lead.error_message = lead.rejection_reason
+                            lead.notes = "Held for a future discovery run instead of spending more Apollo credits"
+                            counts["credit_budget_hit"] += 1
+                        else:
+                            try:
+                                lead = client.enrich_lead(lead)
+                            except Exception as exc:
+                                logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
+                                lead.error_message = str(exc)
+                                lead.rejection_reason = str(exc)
+                            finally:
+                                credits_used_today += 1
+                                lead.apollo_credits_used += 1
+                                lead.apollo_used = True
+                                counts["apollo_credits_used"] += 1
+                                counts["enriched"] += 1
+                                db.record_apollo_usage(
+                                    conn,
+                                    operation="people_match_enrichment",
+                                    credits=1,
+                                    lead=lead,
+                                    notes=f"Budgeted enrichment after tiered search from {lead.source_tier}",
+                                )
 
-                        if lead.email:
-                            lead.email_source = "apollo_enrichment"
-                        lead.refresh_normalized_fields()
+                            if lead.email:
+                                lead.email_source = "apollo_enrichment"
+                            lead.refresh_normalized_fields()
+                            apply_dmv_location(lead)
+                            total_score, score_parts = score_lead(lead, settings)
+                            lead.lead_score = total_score
+                            lead.score_breakdown = breakdown_json(score_parts)
 
-                if not self._lead_is_allowed_by_location(lead):
-                    counts["skipped_non_us"] += 1
-                    logger.info(
-                        "Skipping non-U.S. lead after enrichment: %s at %s (%s)",
-                        lead.full_name or lead.first_name or "unknown",
-                        lead.company_name or "unknown company",
-                        lead.country or "unknown country",
-                    )
-                    continue
-                self._infer_us_country_from_filters(lead)
-                lead.refresh_normalized_fields()
+                    if not self._lead_is_allowed_by_location(lead):
+                        counts["skipped_non_dmv"] += 1
+                        logger.info(
+                            "Skipping non-DMV/non-remote lead after enrichment: %s at %s (%s)",
+                            lead.full_name or lead.first_name or "unknown",
+                            lead.company_name or "unknown company",
+                            lead.location_match or lead.country or "unknown location",
+                        )
+                        continue
+                    lead.refresh_normalized_fields()
 
-                if not lead.email:
-                    if lead.status != "needs_enrichment":
-                        lead.status = "needs_email"
-                        lead.error_message = "No reliable email found after free checks and allowed Apollo usage"
-                    counts["skipped_missing_email"] += 1
-                elif not self._email_domain_matches_company(lead):
-                    lead.status = "needs_email"
-                    lead.error_message = "Email domain does not match company domain"
-                    lead.notes = "Held back before sending because contact email appears to belong to another company"
-                    counts["skipped_missing_email"] += 1
-                else:
-                    lead.status = "pending"
-                    counts["pending"] += 1
+                    if not lead.email:
+                        lead.status = "rejected" if lead.apollo_used else "raw"
+                        lead.rejection_reason = "No reliable email found after allowed enrichment" if lead.apollo_used else "Missing email; enrichment deferred"
+                        lead.error_message = lead.rejection_reason
+                        counts["skipped_missing_email"] += 1
+                    elif not self._email_domain_matches_company(lead):
+                        lead.status = "rejected"
+                        lead.rejection_reason = "Email domain does not match company domain"
+                        lead.error_message = lead.rejection_reason
+                        lead.notes = "Held back before sending because contact email appears to belong to another company"
+                        counts["skipped_missing_email"] += 1
+                    elif lead.lead_score < settings.min_score_to_send:
+                        lead.status = "enriched" if lead.apollo_used else "rejected"
+                        lead.rejection_reason = (
+                            f"Lead score {lead.lead_score} is below send-ready threshold "
+                            f"{settings.min_score_to_send}"
+                        )
+                        lead.error_message = lead.rejection_reason
+                        counts["rejected_below_send_score"] += 1
+                    else:
+                        lead.status = "send_ready"
+                        lead.error_message = ""
+                        lead.rejection_reason = ""
+                        counts["send_ready"] += 1
 
-                action = db.upsert_lead(conn, lead)
-                counts[action] += 1
+                    action = db.upsert_lead(conn, lead)
+                    counts[action] += 1
+                    if lead.status == "send_ready":
+                        subject, body = render_email(lead, settings)
+                        queued_lead_id = db.queue_lead_for_send(
+                            conn,
+                            lead,
+                            scheduled_send_time,
+                            subject,
+                            body,
+                        )
+                        if queued_lead_id:
+                            counts["queued"] += 1
 
-            db.export_to_csv(conn, settings.leads_csv_path)
+                db.export_to_csv(conn, settings.leads_csv_path)
+                db.complete_automation_run(
+                    conn,
+                    run_id,
+                    "success",
+                    counts,
+                    details={"apollo_search_debug": client.search_debug},
+                )
+            except Exception as exc:
+                db.complete_automation_run(conn, run_id, "failed", counts, error_summary=str(exc))
+                raise
 
         logger.info(
-            "Lead fetch complete: %s searched, %s inserted, %s updated, %s pending, "
+            "Lead fetch complete: %s searched, %s inserted, %s updated, %s send-ready, "
             "%s enriched, %s Apollo credits used, %s budget hits, %s rejected low score, "
-            "%s duplicates, %s blocklist, %s missing email, %s non-U.S.",
+            "%s duplicates, %s blocklist, %s company-limit, %s missing email, %s non-DMV/non-remote.",
             counts["searched"],
             counts["inserted"],
             counts["updated"],
-            counts["pending"],
+            counts["send_ready"],
             counts["enriched"],
             counts["apollo_credits_used"],
             counts["credit_budget_hit"],
             counts["rejected_low_score"],
             counts["skipped_duplicate"],
             counts["skipped_blocklist"],
+            counts["skipped_company_limit"],
             counts["skipped_missing_email"],
-            counts["skipped_non_us"],
+            counts["skipped_non_dmv"],
         )
         logger.info("Exported lead CSV to %s", settings.leads_csv_path)
         return counts
@@ -258,6 +350,8 @@ class ColdEmailWorkflow:
                         f"Preview {index}: {lead.email}",
                         f"Company: {lead.company_name}",
                         f"Location: {location}",
+                        f"Location Match: {lead.location_match or 'unknown'}",
+                        f"Role: {lead.role_title or lead.title or 'unknown'}",
                         f"Subject: {subject}",
                         f"Attachments: {', '.join(str(path) for path in self._attachment_paths()) or 'none'}",
                         "-" * 72,
@@ -285,101 +379,179 @@ class ColdEmailWorkflow:
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
+            run_id = db.start_automation_run(
+                conn,
+                "sender",
+                details={"dry_run": dry_run, "daily_send_limit": self.settings.daily_send_limit},
+            )
             sent_today = db.count_sent_today(conn)
-            if self.settings.daily_send_limit <= 0:
-                send_limit = limit if limit is not None else 1_000_000
-            else:
-                remaining_today = max(self.settings.daily_send_limit - sent_today, 0)
-                requested_limit = limit if limit is not None else self.settings.daily_send_limit
-                send_limit = min(requested_limit, remaining_today)
+            try:
+                if self.settings.daily_send_limit <= 0:
+                    send_limit = limit if limit is not None else 1_000_000
+                else:
+                    remaining_today = max(self.settings.daily_send_limit - sent_today, 0)
+                    requested_limit = limit if limit is not None else self.settings.daily_send_limit
+                    send_limit = min(requested_limit, remaining_today)
 
-            if send_limit <= 0:
-                logger.info(
-                    "Daily send limit reached: %s sent today, limit is %s",
-                    sent_today,
-                    self.settings.daily_send_limit,
-                )
-                return counts
-
-            pending_rows = db.get_pending_leads(conn, send_limit)
-            suppression_items = db.read_suppression_list(self.settings.suppression_list_path)
-            do_not_contact_items = db.read_blocklist(self.settings.do_not_contact_path)
-            already_contacted_items = db.read_blocklist(self.settings.already_contacted_path)
-            block_items = suppression_items | do_not_contact_items | already_contacted_items
-
-            if not pending_rows:
-                logger.info("No pending leads with email addresses are ready to send")
-                return counts
-
-            gmail = None if dry_run else GmailClient(self.settings)
-
-            for index, row in enumerate(pending_rows, start=1):
-                lead = Lead.from_row(row)
-                lead_id = row["id"]
-
-                if db.is_suppressed(lead.email, suppression_items):
-                    db.mark_skipped(conn, lead_id, "Email or domain is in the suppression list")
-                    counts["skipped"] += 1
-                    continue
-
-                if db.lead_matches_blocklist(lead, block_items):
-                    db.mark_skipped(conn, lead_id, "Lead matched do-not-contact or already-contacted list")
-                    counts["skipped"] += 1
-                    continue
-
-                if lead.email_source == "unverified_pattern_guess" and not self.settings.allow_unverified_email_patterns:
-                    db.mark_skipped(conn, lead_id, "Unverified email pattern guesses are disabled")
-                    counts["skipped"] += 1
-                    continue
-
-                if db.email_already_sent(conn, lead.email_lower, lead_id):
-                    db.mark_skipped(conn, lead_id, "Duplicate email already sent previously")
-                    counts["skipped"] += 1
-                    continue
-
-                if not self._lead_is_allowed_by_location(lead):
-                    db.mark_skipped(conn, lead_id, "Contact location is not United States")
-                    counts["skipped"] += 1
-                    continue
-
-                if lead.lead_score and lead.lead_score < self.settings.lead_score_threshold:
-                    db.mark_skipped(conn, lead_id, "Lead score fell below the configured threshold")
-                    counts["skipped"] += 1
-                    continue
-
-                if not self._email_domain_matches_company(lead):
-                    db.mark_skipped(conn, lead_id, "Email domain does not match company domain")
-                    counts["skipped"] += 1
-                    continue
-
-                subject, body = render_email(lead, self.settings)
-
-                if dry_run:
+                if send_limit <= 0:
                     logger.info(
-                        "DRY RUN: would send to %s with subject %r and %s attachment(s)",
-                        lead.email,
-                        subject,
-                        len(attachment_paths),
+                        "Daily send limit reached: %s sent today, limit is %s",
+                        sent_today,
+                        self.settings.daily_send_limit,
                     )
-                    counts["dry_run"] += 1
-                    continue
+                    db.complete_automation_run(conn, run_id, "success", counts)
+                    return counts
 
-                try:
-                    gmail_message_id = gmail.send_email(
-                        lead.email,
-                        subject,
-                        body,
-                        attachment_paths=attachment_paths,
+                pending_rows = db.get_send_queue_candidates(
+                    conn,
+                    send_limit,
+                    self.settings.min_score_to_send,
+                )
+                suppression_items = db.read_suppression_list(self.settings.suppression_list_path)
+                do_not_contact_items = db.read_blocklist(self.settings.do_not_contact_path)
+                already_contacted_items = db.read_blocklist(self.settings.already_contacted_path)
+                block_items = suppression_items | do_not_contact_items | already_contacted_items
+
+                if not pending_rows:
+                    logger.info("No pending leads with email addresses are ready to send")
+                    db.complete_automation_run(conn, run_id, "success", counts)
+                    return counts
+                if (
+                    self.settings.daily_send_target_min > 0
+                    and len(pending_rows) < self.settings.daily_send_target_min
+                ):
+                    logger.warning(
+                        "Only %s send-ready DMV leads are available; daily target is %s. "
+                        "Discovery needs more qualified leads before the sender can hit the target.",
+                        len(pending_rows),
+                        self.settings.daily_send_target_min,
                     )
-                    db.mark_sent(conn, lead_id, gmail_message_id)
-                    counts["sent"] += 1
-                except Exception as exc:
-                    logger.exception("Failed to send email to %s: %s", lead.email, exc)
-                    db.mark_failed(conn, lead_id, str(exc))
-                    counts["failed"] += 1
 
-                if index < len(pending_rows) and self.settings.delay_between_emails_seconds > 0:
-                    time.sleep(self.settings.delay_between_emails_seconds)
+                gmail = None if dry_run else GmailClient(self.settings)
+
+                for index, row in enumerate(pending_rows, start=1):
+                    lead = Lead.from_row(row)
+                    lead_id = row["id"]
+                    send_queue_id = row["send_queue_id"] if "send_queue_id" in row.keys() else None
+
+                    if lead.queue_status != "queued":
+                        reason = "Lead is not queued for the 8 AM sender"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if lead.manually_skipped:
+                        reason = "Lead was manually skipped in Daily Discovery Review"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if db.is_suppressed(lead.email, suppression_items):
+                        reason = "Email or domain is in the suppression list"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if db.lead_matches_blocklist(lead, block_items):
+                        reason = "Lead matched do-not-contact or already-contacted list"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if lead.email_source == "unverified_pattern_guess" and not self.settings.allow_unverified_email_patterns:
+                        reason = "Unverified email pattern guesses are disabled"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if db.email_already_sent(conn, lead.email_lower, lead_id):
+                        reason = "Duplicate email already sent previously"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if db.company_contact_count_this_week(conn, lead) > self.settings.max_contacts_per_company_per_week:
+                        reason = "Company weekly contact limit reached"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if not self._lead_is_allowed_by_location(lead):
+                        reason = "Lead is outside the DMV/remote target area"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if lead.lead_score and lead.lead_score < self.settings.min_score_to_send:
+                        reason = "Lead score fell below the send-ready threshold"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    if not self._email_domain_matches_company(lead):
+                        reason = "Email domain does not match company domain"
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    subject, body = render_email(lead, self.settings)
+
+                    if dry_run:
+                        logger.info(
+                            "DRY RUN: would send to %s with subject %r and %s attachment(s)",
+                            lead.email,
+                            subject,
+                            len(attachment_paths),
+                        )
+                        db.record_email_event(conn, lead_id, "drafted", subject=subject)
+                        counts["dry_run"] += 1
+                        continue
+
+                    try:
+                        gmail_message_id = gmail.send_email(
+                            lead.email,
+                            subject,
+                            body,
+                            attachment_paths=attachment_paths,
+                        )
+                        db.mark_sent(conn, lead_id, gmail_message_id)
+                        db.update_send_queue_status(conn, lead_id, "sent", send_queue_id=send_queue_id)
+                        db.record_email_event(conn, lead_id, "sent", subject=subject)
+                        counts["sent"] += 1
+                    except Exception as exc:
+                        logger.exception("Failed to send email to %s: %s", lead.email, exc)
+                        db.mark_failed(conn, lead_id, str(exc))
+                        db.update_send_queue_status(conn, lead_id, "failed", str(exc), send_queue_id)
+                        db.record_email_event(conn, lead_id, "failed", subject=subject, error_message=str(exc))
+                        counts["failed"] += 1
+
+                    if index < len(pending_rows) and self.settings.delay_between_emails_seconds > 0:
+                        time.sleep(self.settings.delay_between_emails_seconds)
+
+                db.complete_automation_run(conn, run_id, "success", counts)
+            except Exception as exc:
+                db.complete_automation_run(conn, run_id, "failed", counts, error_summary=str(exc))
+                raise
 
         logger.info(
             "Send complete: %s sent, %s failed, %s skipped, %s dry-run",
@@ -421,7 +593,7 @@ class ColdEmailWorkflow:
     def rescore_existing_leads(self) -> dict[str, int]:
         """Apply the current quality gates to already-queued leads."""
 
-        counts = {"rescored": 0, "rejected": 0, "blocked": 0, "duplicate_pending": 0}
+        counts = {"rescored": 0, "rejected": 0, "blocked": 0, "non_dmv": 0, "duplicate_pending": 0}
         with db.connect(self.settings.database_path) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
@@ -434,7 +606,7 @@ class ColdEmailWorkflow:
                 """
                 SELECT *
                 FROM leads
-                WHERE status IN ('pending', 'needs_email', 'needs_enrichment')
+                WHERE status IN ('pending', 'send_ready', 'raw', 'enriched', 'needs_email', 'needs_enrichment')
                 ORDER BY lead_score DESC, created_at ASC, id ASC
                 """
             ).fetchall()
@@ -443,9 +615,24 @@ class ColdEmailWorkflow:
             for row in rows:
                 lead = Lead.from_row(row)
                 lead.refresh_normalized_fields()
+                apply_dmv_location(lead)
+                db.update_lead_dmv_fields(conn, row["id"], lead)
                 score, parts = score_lead(lead, self.settings)
                 score_json = breakdown_json(parts)
                 counts["rescored"] += 1
+
+                if not self._lead_is_allowed_by_location(lead):
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="skipped",
+                        error_message="Outside DMV/remote internship target area during rescore",
+                        notes="Removed from pending queue before send",
+                    )
+                    counts["non_dmv"] += 1
+                    continue
 
                 if db.lead_matches_blocklist(lead, block_items):
                     db.update_lead_quality(
@@ -474,7 +661,7 @@ class ColdEmailWorkflow:
                     counts["blocked"] += 1
                     continue
 
-                if score < self.settings.lead_score_threshold:
+                if score < self.settings.min_score_to_send:
                     db.update_lead_quality(
                         conn,
                         row["id"],
@@ -483,7 +670,7 @@ class ColdEmailWorkflow:
                         status="rejected",
                         error_message=(
                             f"Lead score {score} is below threshold "
-                            f"{self.settings.lead_score_threshold}"
+                            f"{self.settings.min_score_to_send}"
                         ),
                         notes="Rejected by current scoring model before send",
                     )
@@ -503,7 +690,7 @@ class ColdEmailWorkflow:
                     counts["blocked"] += 1
                     continue
 
-                db.update_lead_quality(conn, row["id"], score, score_json)
+                db.update_lead_quality(conn, row["id"], score, score_json, status="send_ready" if lead.email else "raw")
                 pending_candidates.append((row["id"], lead, score))
 
             seen_company_keys = set()
@@ -518,10 +705,11 @@ class ColdEmailWorkflow:
                 seen_company_keys.add(key)
 
         logger.info(
-            "Rescore complete: %s rescored, %s rejected, %s blocked, %s duplicate pending skipped",
+            "Rescore complete: %s rescored, %s rejected, %s blocked, %s non-DMV skipped, %s duplicate pending skipped",
             counts["rescored"],
             counts["rejected"],
             counts["blocked"],
+            counts["non_dmv"],
             counts["duplicate_pending"],
         )
         return counts
@@ -531,24 +719,16 @@ class ColdEmailWorkflow:
             return []
         return [self.settings.resume_file]
 
-    def _lead_is_allowed_by_location(self, lead: Lead) -> bool:
-        requested_locations = {item.strip().lower() for item in self.settings.apollo_person_locations}
-        us_only = requested_locations == {"united states"}
-        if not us_only:
-            return True
-        if not lead.country.strip():
-            return True
-        return lead.country.strip().lower() in {
-            "united states",
-            "united states of america",
-            "usa",
-            "us",
-        }
+    def _next_morning_send_time(self) -> str:
+        now = datetime.now()
+        next_send = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now >= next_send:
+            next_send += timedelta(days=1)
+        return next_send.isoformat(timespec="seconds")
 
-    def _infer_us_country_from_filters(self, lead: Lead) -> None:
-        requested_locations = {item.strip().lower() for item in self.settings.apollo_person_locations}
-        if requested_locations == {"united states"} and not lead.country.strip():
-            lead.country = "United States"
+    def _lead_is_allowed_by_location(self, lead: Lead) -> bool:
+        apply_dmv_location(lead)
+        return bool(lead.is_dmv)
 
     def _email_domain_matches_company(self, lead: Lead) -> bool:
         if not lead.email or not lead.normalized_domain:
@@ -603,6 +783,7 @@ class ColdEmailWorkflow:
             counts = db.status_counts(conn)
             sent_today = db.count_sent_today(conn)
             apollo_credits_today = db.count_apollo_credits_today(conn)
+            send_ready_pending = db.count_send_ready_pending(conn)
 
         print("Lead status counts:")
         if counts:
@@ -621,4 +802,9 @@ class ColdEmailWorkflow:
                 "Apollo enrichment credits today: "
                 f"{apollo_credits_today}/{self.settings.apollo_daily_credit_limit}"
             )
+        print(f"Send-ready DMV pending leads: {send_ready_pending}")
+        if self.settings.daily_send_target_min > 0:
+            print(f"Daily send target: {self.settings.daily_send_target_min}-{self.settings.daily_send_limit}")
+        if self.settings.pending_inventory_target > 0:
+            print(f"Preferred pending inventory: {self.settings.pending_inventory_target}")
         return counts

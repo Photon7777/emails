@@ -12,13 +12,14 @@ Local history and blocklists
   -> already_contacted.txt
   -> suppression_list.txt
 
-Narrow Apollo search
-  -> U.S. location filters
-  -> relevant recruiter/data/hiring titles
-  -> relevant company size filters
-  -> relevant job posting title filters
+Tiered Apollo search
+  -> strict DMV + remote internships
+  -> broader DMV data/AI/company signals
+  -> remote U.S. internships
+  -> warm company-first search
 
 Qualification gate
+  -> reject non-DMV/non-remote candidates
   -> normalize company/contact identity
   -> skip duplicates and already-contacted companies
   -> score company/contact fit
@@ -30,38 +31,42 @@ Budgeted Apollo enrichment
   -> only while daily credit budget remains
 
 Outreach queue
-  -> pending leads only
+  -> send_ready leads only
   -> preview file
-  -> Gmail API sender at 8:00 AM
+  -> dry-run Gmail API sender at 8:00 AM unless live sending is explicitly confirmed
 ```
 
 ## Step-by-Step Workflow
 
 1. Load `.env`, local SQLite, CSV export, and blocklists.
 2. Backfill normalized keys for older rows.
-3. Run narrow Apollo search with existing filters. This returns candidate people, but the workflow does not enrich them yet.
+3. Run tiered Apollo search. This returns candidate people, but the workflow does not enrich them yet.
 4. Normalize identity fields:
    - company name
    - company domain
    - LinkedIn URL
    - email
-5. Skip immediately if the company/contact matches:
+5. Skip immediately if the company or role is outside Washington DC, Maryland, Virginia, or remote eligibility.
+6. Skip immediately if the company/contact matches:
    - local SQLite history
    - CSV export or manual sheet dump
    - `do_not_contact.txt`
    - `already_contacted.txt`
    - `suppression_list.txt`
    - sent, rejected, bounced, not relevant, or unsubscribed rows
-6. Score remaining candidates from 0 to 100.
-7. Reject low-fit candidates before any enrichment.
-8. If the lead already has a reliable email from search or local data, confirm the work email domain matches the company domain, then queue it as `pending`.
-9. If the lead has no email, use Apollo enrichment only when:
-   - the company/contact score passes the threshold
+7. Enforce `MAX_CONTACTS_PER_COMPANY_PER_WEEK`.
+8. Score remaining candidates from 0 to 100.
+9. Reject candidates below `MIN_SCORE_TO_ENRICH` before any enrichment.
+10. If the lead already has a reliable email from search or local data, confirm the work email domain matches the company domain, then queue it as `send_ready` only if `score >= MIN_SCORE_TO_SEND`.
+11. If the lead has no email, use Apollo enrichment only when:
+   - the lead is DMV-based or remote-eligible
+   - the company/contact score is at least `MIN_SCORE_TO_ENRICH`
    - the company has not been contacted
    - the role title is relevant
    - the daily Apollo credit budget is not exhausted
-10. Save fresh previews.
-11. The morning sender sends only `pending` leads with emails through Gmail API.
+12. Rescore after enrichment. Only `score >= MIN_SCORE_TO_SEND` becomes `send_ready`.
+13. Save fresh previews and structured run logs.
+14. The morning sender drafts/logs only by default.
 
 When scoring rules change, run:
 
@@ -77,10 +82,13 @@ Key modules:
 
 - `lead.py`: lead model plus normalization helpers.
 - `lead_scoring.py`: scoring model and score breakdown JSON.
+- `dmv_location.py`: DMV/remote normalization and hard location gate.
+- `search_tiers.py`: Apollo fallback tiers.
 - `db.py`: SQLite schema, migrations, dedupe checks, blocklists, CSV identity checks, and Apollo usage tracking.
 - `apollo_client.py`: narrow Apollo search and enrichment calls.
 - `workflow.py`: orchestrates the credit-saving pipeline.
 - `gmail_client.py`: sends email through Gmail API.
+- `dashboard.py`: Streamlit monitoring UI.
 
 The main change is in `workflow.fetch_leads()`:
 
@@ -95,14 +103,19 @@ The `leads` table includes:
 
 ```text
 company_name
+role_title
 company_domain
 normalized_company_name
 normalized_domain
-contact_name through first_name, last_name, full_name
+contact_name
+contact_title
+first_name, last_name, full_name
 title
 email
 email_lower
 email_source
+email_status
+source_tier
 linkedin_url
 normalized_linkedin_url
 company_industry
@@ -110,11 +123,16 @@ company_size
 city
 state
 country
+location_match
+is_dmv
+remote_dmv_eligible
+internship_type
 lead_score
 score_breakdown
 apollo_used
 apollo_credits_used
 status
+rejection_reason
 last_contacted_date
 email_sent
 reply_received
@@ -139,16 +157,18 @@ contact_name
 notes
 ```
 
+The `automation_runs`, `email_events`, and `apollo_search_logs` tables track daily run health, send/draft/skip/failure events, and Apollo tier/query performance for the dashboard.
+
 Useful statuses:
 
 ```text
-pending
+raw
+enriched
+send_ready
 sent
 failed
 skipped
 rejected
-needs_email
-needs_enrichment
 bounced
 not_relevant
 unsubscribed
@@ -156,24 +176,26 @@ unsubscribed
 
 ## Lead Scoring Model
 
-Default threshold:
+Default thresholds:
 
 ```bash
-LEAD_SCORE_THRESHOLD=70
+MIN_SCORE_TO_ENRICH=55
+MIN_SCORE_TO_SEND=70
 ```
 
 Score breakdown:
 
 ```text
-Industry fit: 0-25
-Role relevance: 0-25
-Location fit: 0-15
-Company size fit: 0-10
+DMV or remote fit: 0-25
+Hiring/contact title relevance: 0-20
+Company/role keyword fit: 0-20
 Hiring signal: 0-15
-Contact quality: 0-10
+Company size fit: 0-10
+Email quality: 0-10
+Penalties: -20 outside DMV/non-remote, -20 irrelevant title, -30 missing email after enrichment
 ```
 
-Apollo enrichment is skipped unless the total score is at or above the threshold.
+Apollo enrichment is skipped unless the total score is at or above `MIN_SCORE_TO_ENRICH`. Send-ready status requires `MIN_SCORE_TO_SEND`.
 
 ## Apollo Credit-Saving Logic
 
@@ -183,8 +205,8 @@ Apollo enrichment is allowed only when all are true:
 - The lead is not in the CSV identity index.
 - The company/contact is not in any blocklist.
 - The company has not already been emailed.
-- The lead is U.S.-based or inferred U.S.-based from the configured filters.
-- The lead score is at or above `LEAD_SCORE_THRESHOLD`.
+- The lead is in Washington DC, Maryland, Virginia, or is a remote U.S. role.
+- The lead score is at or above `MIN_SCORE_TO_ENRICH`.
 - The lead has no reliable email from cheaper sources.
 - The daily Apollo credit budget has remaining capacity.
 
@@ -196,7 +218,7 @@ Apollo enrichment is skipped for:
 - rejected or not-relevant companies
 - bounced or unsubscribed records
 - low-score leads
-- non-U.S. contacts
+- non-DMV/non-remote contacts
 - contacts with irrelevant titles
 - work emails that do not match the company domain
 
@@ -205,7 +227,7 @@ Apollo enrichment is skipped for:
 Default:
 
 ```bash
-APOLLO_DAILY_CREDIT_LIMIT=25
+DAILY_ENRICH_LIMIT=25
 ```
 
 Each `people/match` enrichment attempt records one estimated credit in `apollo_usage`.
@@ -246,13 +268,14 @@ Recommended future low-credit additions:
 ## Pseudocode
 
 ```python
-raw_candidates = apollo.search_people_with_strict_filters()
+raw_candidates = apollo.search_people_with_fallback_tiers()
 credits_used = db.count_apollo_credits_today()
 
 for candidate in raw_candidates:
     lead = normalize(candidate)
 
-    if not is_us_lead(lead):
+    apply_dmv_location(lead)
+    if not lead.is_dmv:
         continue
 
     if matches_blocklist(lead):
@@ -262,31 +285,32 @@ for candidate in raw_candidates:
         continue
 
     score = score_lead(lead)
-    if score < LEAD_SCORE_THRESHOLD:
+    if score < MIN_SCORE_TO_ENRICH:
         save_as_rejected(lead)
         continue
 
-    if lead.email:
-        save_as_pending(lead)
+    if lead.email and score >= MIN_SCORE_TO_SEND:
+        save_as_send_ready(lead)
         continue
 
     try_free_email_fallbacks(lead)
-    if lead.email:
-        save_as_pending(lead)
+    if lead.email and score >= MIN_SCORE_TO_SEND:
+        save_as_send_ready(lead)
         continue
 
-    if credits_used >= APOLLO_DAILY_CREDIT_LIMIT:
-        save_as_needs_enrichment(lead)
+    if credits_used >= DAILY_ENRICH_LIMIT:
+        save_as_raw_deferred(lead)
         continue
 
     enriched = apollo.enrich(lead)
     credits_used += 1
     record_apollo_usage(lead)
+    score = score_lead(enriched)
 
-    if enriched.email:
-        save_as_pending(enriched)
+    if enriched.email and score >= MIN_SCORE_TO_SEND:
+        save_as_send_ready(enriched)
     else:
-        save_as_needs_email(enriched)
+        save_as_rejected_or_enriched_hold(enriched)
 ```
 
 ## Recommended Folder Structure
@@ -299,12 +323,17 @@ emails/
   main.py
   config.py
   lead.py
+  dmv_location.py
+  search_tiers.py
   lead_scoring.py
   db.py
   apollo_client.py
   gmail_client.py
   email_template.py
   workflow.py
+  run_discovery.py
+  run_sender.py
+  dashboard.py
   docs/
     credit_saving_workflow.md
   templates/
@@ -335,16 +364,18 @@ Use two launchd jobs:
 
 The 9:00 PM job:
 
-- searches with strict Apollo filters
+- searches with tiered Apollo fallback filters
+- falls back across four Apollo search tiers
 - skips duplicates and blocked companies
 - scores leads
-- spends at most `APOLLO_DAILY_CREDIT_LIMIT`
+- spends at most `DAILY_ENRICH_LIMIT`
 - writes previews
 - does not send email
 
 The 8:00 AM job:
 
-- sends only `pending` leads
+- drafts/logs only by default through `run_sender.py`
+- sends only `send_ready` leads if live sending is explicitly confirmed
 - assumes older queues were cleaned with `python main.py rescore` after scoring changes
 - respects Gmail settings and delay controls
 - attaches the configured resume
@@ -353,12 +384,18 @@ The 8:00 AM job:
 Recommended conservative settings:
 
 ```bash
-APOLLO_DAILY_CREDIT_LIMIT=25
-LEAD_SCORE_THRESHOLD=70
-DAILY_SEND_LIMIT=25
+DAILY_ENRICH_LIMIT=25
+MIN_SCORE_TO_ENRICH=55
+MIN_SCORE_TO_SEND=70
+MAX_CONTACTS_PER_COMPANY_PER_WEEK=2
+DAILY_SEND_LIMIT=30
+DAILY_SEND_TARGET_MIN=25
+PENDING_INVENTORY_TARGET=40
 DELAY_BETWEEN_EMAILS_SECONDS=45
 ALLOW_UNVERIFIED_EMAIL_PATTERNS=false
 ```
+
+The sender aims for 25-30 emails per day when enough qualified DMV/remote leads are queued. If fewer than 25 send-ready leads exist, the workflow logs a warning instead of relaxing location, dedupe, score, suppression, or email-domain safeguards.
 
 ## Error Handling and Retry Logic
 

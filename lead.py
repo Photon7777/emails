@@ -68,6 +68,7 @@ class Lead:
     full_name: str = ""
     email: str = ""
     title: str = ""
+    role_title: str = ""
     company_name: str = ""
     company_domain: str = ""
     company_industry: str = ""
@@ -80,6 +81,15 @@ class Lead:
     reason_for_outreach: str = ""
     source: str = "apollo"
     email_source: str = ""
+    email_status: str = ""
+    source_tier: str = ""
+    search_tier: str = ""
+    contact_name: str = ""
+    contact_title: str = ""
+    location_match: str = ""
+    is_dmv: bool = False
+    remote_dmv_eligible: bool = False
+    internship_type: str = ""
     normalized_company_name: str = ""
     normalized_domain: str = ""
     normalized_linkedin_url: str = ""
@@ -94,6 +104,13 @@ class Lead:
     notes: str = ""
     status: str = "pending"
     error_message: str = ""
+    rejection_reason: str = ""
+    discovery_run_id: int = 0
+    queued_send_time: str = ""
+    queue_status: str = "not_queued"
+    approved_for_send: bool = False
+    manually_skipped: bool = False
+    manual_review_note: str = ""
     raw_json: str = "{}"
 
     @property
@@ -106,6 +123,8 @@ class Lead:
         self.normalized_linkedin_url = normalize_linkedin_url(self.linkedin_url)
         if self.email and not self.email_source:
             self.email_source = self.source or "unknown"
+        self.contact_name = self.full_name or self.contact_name
+        self.contact_title = self.title or self.contact_title
 
     @classmethod
     def from_row(cls, row) -> "Lead":
@@ -125,7 +144,8 @@ class Lead:
             last_name=get("last_name"),
             full_name=get("full_name"),
             email=get("email"),
-            title=get("title"),
+            title=get("title") or get("contact_title"),
+            role_title=get("role_title"),
             company_name=get("company_name"),
             company_domain=get("company_domain"),
             company_industry=get("company_industry"),
@@ -138,6 +158,15 @@ class Lead:
             reason_for_outreach=get("reason_for_outreach"),
             source=get("source", "apollo") or "apollo",
             email_source=get("email_source"),
+            email_status=get("email_status"),
+            source_tier=get("source_tier"),
+            search_tier=get("search_tier") or get("source_tier"),
+            contact_name=get("contact_name") or get("full_name"),
+            contact_title=get("contact_title") or get("title"),
+            location_match=get("location_match"),
+            is_dmv=get_bool("is_dmv"),
+            remote_dmv_eligible=get_bool("remote_dmv_eligible"),
+            internship_type=get("internship_type"),
             normalized_company_name=get("normalized_company_name"),
             normalized_domain=get("normalized_domain"),
             normalized_linkedin_url=get("normalized_linkedin_url"),
@@ -152,6 +181,13 @@ class Lead:
             notes=get("notes"),
             status=get("status", "pending") or "pending",
             error_message=get("error_message"),
+            rejection_reason=get("rejection_reason"),
+            discovery_run_id=int(get("discovery_run_id", 0) or 0),
+            queued_send_time=get("queued_send_time"),
+            queue_status=get("queue_status", "not_queued") or "not_queued",
+            approved_for_send=get_bool("approved_for_send"),
+            manually_skipped=get_bool("manually_skipped"),
+            manual_review_note=get("manual_review_note"),
             raw_json=get("raw_json", "{}") or "{}",
         )
 

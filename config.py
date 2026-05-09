@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 def _get_str(name: str, default: str = "") -> str:
@@ -71,6 +71,9 @@ class Settings:
     apollo_enrich_missing_emails: bool
     apollo_reveal_personal_emails: bool
     apollo_daily_credit_limit: int
+    min_score_to_enrich: int
+    min_score_to_send: int
+    max_contacts_per_company_per_week: int
     lead_score_threshold: int
     allow_unverified_email_patterns: bool
 
@@ -94,6 +97,8 @@ class Settings:
 
     dry_run: bool
     daily_send_limit: int
+    daily_send_target_min: int
+    pending_inventory_target: int
     delay_between_emails_seconds: int
     max_retries: int
 
@@ -109,6 +114,7 @@ class Settings:
 def load_settings() -> Settings:
     """Load all settings from .env and apply safe defaults."""
 
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
     return Settings(
         project_root=PROJECT_ROOT,
         apollo_api_key=_get_str("APOLLO_API_KEY"),
@@ -133,8 +139,14 @@ def load_settings() -> Settings:
         ),
         apollo_enrich_missing_emails=_get_bool("APOLLO_ENRICH_MISSING_EMAILS", True),
         apollo_reveal_personal_emails=_get_bool("APOLLO_REVEAL_PERSONAL_EMAILS", False),
-        apollo_daily_credit_limit=_get_int("APOLLO_DAILY_CREDIT_LIMIT", 25),
-        lead_score_threshold=_get_int("LEAD_SCORE_THRESHOLD", 70),
+        apollo_daily_credit_limit=_get_int(
+            "DAILY_ENRICH_LIMIT",
+            _get_int("APOLLO_DAILY_CREDIT_LIMIT", 25),
+        ),
+        min_score_to_enrich=_get_int("MIN_SCORE_TO_ENRICH", 55),
+        min_score_to_send=_get_int("MIN_SCORE_TO_SEND", _get_int("LEAD_SCORE_THRESHOLD", 70)),
+        max_contacts_per_company_per_week=_get_int("MAX_CONTACTS_PER_COMPANY_PER_WEEK", 2),
+        lead_score_threshold=_get_int("MIN_SCORE_TO_SEND", _get_int("LEAD_SCORE_THRESHOLD", 70)),
         allow_unverified_email_patterns=_get_bool("ALLOW_UNVERIFIED_EMAIL_PATTERNS", False),
         gmail_credentials_file=_path_from_env("GMAIL_CREDENTIALS_FILE", "credentials.json"),
         gmail_token_file=_path_from_env("GMAIL_TOKEN_FILE", "token.json"),
@@ -155,10 +167,12 @@ def load_settings() -> Settings:
         email_template_path=_path_from_env("EMAIL_TEMPLATE_PATH", "templates/internship_outreach.txt"),
         unsubscribe_text=_get_str(
             "UNSUBSCRIBE_TEXT",
-            'If this is not relevant, reply "unsubscribe" and I will not contact you again.',
+            "",
         ),
         dry_run=_get_bool("DRY_RUN", True),
         daily_send_limit=_get_int("DAILY_SEND_LIMIT", 20),
+        daily_send_target_min=_get_int("DAILY_SEND_TARGET_MIN", 0),
+        pending_inventory_target=_get_int("PENDING_INVENTORY_TARGET", 0),
         delay_between_emails_seconds=_get_int("DELAY_BETWEEN_EMAILS_SECONDS", 45),
         max_retries=_get_int("MAX_RETRIES", 3),
         database_path=_path_from_env("DATABASE_PATH", "data/leads.sqlite"),

@@ -17,7 +17,6 @@ def _identity_block(settings: Settings) -> str:
     lines = [
         settings.sender_name,
         settings.sender_role,
-        settings.sender_location,
         settings.sender_email,
         settings.sender_linkedin,
         settings.sender_portfolio,
@@ -89,7 +88,12 @@ def _company_specific_reason(lead: Lead) -> tuple[str, str]:
     fit_area = _company_fit_area(industry)
     location = ", ".join(part for part in [lead.city, lead.state] if part)
 
-    location_text = f" I also noticed the contact location listed as {location}, which fits my U.S.-focused search." if location else ""
+    if lead.remote_dmv_eligible:
+        location_text = " I also noticed the role appears remote-friendly, which fits my DMV-focused search."
+    elif location:
+        location_text = f" I also noticed the contact location listed as {location}, which fits my DMV-focused search."
+    else:
+        location_text = ""
     reason = (
         f"What stood out about {company_name} is the connection between its work in {industry} "
         f"and my background in {fit_area}. {_role_angle(role)}{location_text}"

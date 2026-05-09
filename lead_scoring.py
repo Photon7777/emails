@@ -6,6 +6,7 @@ import json
 import re
 
 from config import Settings
+from dmv_location import apply_dmv_location
 from lead import Lead
 
 
@@ -18,6 +19,8 @@ ROLE_KEYWORDS = {
     "hr",
     "human resources",
     "hiring manager",
+    "founder",
+    "co-founder",
     "data analytics manager",
     "analytics manager",
     "business intelligence manager",
@@ -26,17 +29,27 @@ ROLE_KEYWORDS = {
     "data science manager",
     "machine learning manager",
     "ai engineering manager",
+    "engineering manager",
+    "people operations",
 }
 
 HIRING_KEYWORDS = {
     "data analyst intern",
+    "data scientist intern",
+    "data engineer intern",
     "business analyst intern",
     "analytics intern",
+    "bi intern",
     "data science intern",
+    "ai/ml intern",
     "ai engineer intern",
+    "ai engineer internship",
+    "ml intern",
     "machine learning intern",
+    "cloud/data intern",
     "cloud intern",
     "consulting intern",
+    "summer 2026",
     "early talent",
     "campus",
     "internship",
@@ -53,6 +66,25 @@ INDUSTRY_KEYWORDS = {
     "research",
     "cloud",
     "data",
+    "ml",
+    "python",
+    "sql",
+    "automation",
+    "fintech",
+    "saas",
+    "healthcare tech",
+    "product analytics",
+    "business intelligence",
+}
+
+IRRELEVANT_TITLE_KEYWORDS = {
+    "account executive",
+    "sales",
+    "customer success",
+    "marketing",
+    "brand",
+    "partnerships",
+    "revenue",
 }
 
 
@@ -74,53 +106,39 @@ def _parse_company_size(raw_size: str) -> int | None:
 
 
 def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str]]:
-    """Score a lead from 0 to 100 before paid enrichment.
+    """Score a lead from 0 to 100 using the current outreach rubric."""
 
-    Breakdown:
-    - Industry fit: 0-25
-    - Role relevance: 0-25
-    - Location fit: 0-15
-    - Company size fit: 0-10
-    - Hiring signal: 0-15
-    - Contact quality: 0-10
-    """
-
-    industry_text = _text(lead.company_industry, lead.company_name, lead.reason_for_outreach)
-    title_text = _text(lead.title)
-    location_text = _text(lead.city, lead.state, lead.country)
+    location_decision = apply_dmv_location(lead)
+    industry_text = _text(lead.company_industry, lead.company_name, lead.reason_for_outreach, lead.raw_json)
+    contact_title_text = _text(lead.title, lead.contact_title)
+    role_text = _text(lead.role_title, lead.reason_for_outreach, lead.raw_json)
     raw_text = _text(lead.raw_json, lead.reason_for_outreach)
     target_industries = {item.lower() for item in settings.apollo_industries} | INDUSTRY_KEYWORDS
-    target_roles = {item.lower() for item in settings.apollo_job_titles} | ROLE_KEYWORDS
+    target_contact_roles = {item.lower() for item in settings.apollo_job_titles} | ROLE_KEYWORDS
     target_hiring = {item.lower() for item in settings.apollo_target_job_titles} | HIRING_KEYWORDS
 
-    industry_fit = 0
+    location_fit = 25 if location_decision.is_dmv else 0
+
+    keyword_fit = 0
     if _contains_any(industry_text, target_industries):
-        industry_fit = 25
+        keyword_fit = 20
     elif _contains_any(industry_text, {"technology", "finance", "bank", "biotech", "engineering"}):
-        industry_fit = 18
+        keyword_fit = 14
     elif lead.company_industry:
-        industry_fit = 10
+        keyword_fit = 8
 
     role_relevance = 0
-    if _contains_any(title_text, target_roles):
-        role_relevance = 25
-    elif _contains_any(title_text, {"manager", "director", "founder", "co-founder", "people"}):
-        role_relevance = 16
-    elif lead.title:
-        role_relevance = 8
-
-    location_fit = 0
-    if lead.country.lower() in {"united states", "united states of america", "usa", "us"}:
-        location_fit = 15
-    elif not lead.country and "united states" in {item.lower() for item in settings.apollo_person_locations}:
-        location_fit = 10
-    elif _contains_any(location_text, {"united states", "usa"}):
-        location_fit = 12
+    if _contains_any(contact_title_text, target_contact_roles):
+        role_relevance = 20
+    elif _contains_any(contact_title_text, {"manager", "director", "founder", "co-founder", "people"}):
+        role_relevance = 14
+    elif lead.title or lead.role_title:
+        role_relevance = 6
 
     size = _parse_company_size(lead.company_size)
     if size is None:
-        company_size_fit = 4
-    elif 51 <= size <= 5000:
+        company_size_fit = 5
+    elif 11 <= size <= 5000:
         company_size_fit = 10
     elif 11 <= size <= 50 or 5001 <= size <= 20000:
         company_size_fit = 7
@@ -128,35 +146,40 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
         company_size_fit = 4
 
     hiring_signal = 0
-    if _contains_any(raw_text, target_hiring):
+    if _contains_any(role_text, target_hiring) or _contains_any(raw_text, target_hiring):
         hiring_signal = 15
     elif _contains_any(raw_text, {"data", "analytics", "machine learning", "ai", "cloud", "consulting"}):
         hiring_signal = 10
-    elif _contains_any(title_text, {"recruiter", "talent", "hiring"}):
+    elif _contains_any(contact_title_text, {"recruiter", "talent", "hiring"}):
         hiring_signal = 6
 
-    contact_quality = 0
-    if lead.full_name or lead.first_name:
-        contact_quality += 3
-    if lead.linkedin_url:
-        contact_quality += 2
-    if lead.email:
-        contact_quality += 3
-    if role_relevance >= 16:
-        contact_quality += 2
-    contact_quality = min(contact_quality, 10)
+    email_quality = 0
+    if lead.email and lead.email_status.lower() in {"verified", "likely to engage", "likely valid", "valid"}:
+        email_quality = 10
+    elif lead.email:
+        email_quality = 6
+
+    penalties = 0
+    if not location_decision.is_dmv:
+        penalties -= 20
+    if _contains_any(contact_title_text, IRRELEVANT_TITLE_KEYWORDS) and role_relevance < 14:
+        penalties -= 20
+    if lead.apollo_used and not lead.email:
+        penalties -= 30
 
     breakdown = {
-        "industry_fit": industry_fit,
-        "role_relevance": role_relevance,
         "location_fit": location_fit,
-        "company_size_fit": company_size_fit,
+        "role_relevance": role_relevance,
+        "keyword_fit": keyword_fit,
         "hiring_signal": hiring_signal,
-        "contact_quality": contact_quality,
+        "company_size_fit": company_size_fit,
+        "email_quality": email_quality,
+        "penalties": penalties,
     }
-    total = sum(int(value) for value in breakdown.values())
+    total = max(0, min(100, sum(int(value) for value in breakdown.values())))
     breakdown["total"] = total
-    breakdown["threshold"] = settings.lead_score_threshold
+    breakdown["min_score_to_enrich"] = settings.min_score_to_enrich
+    breakdown["min_score_to_send"] = settings.min_score_to_send
     return total, breakdown
 
 

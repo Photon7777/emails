@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,9 @@ LEAD_COLUMNS = [
     "email",
     "email_lower",
     "title",
+    "role_title",
+    "contact_name",
+    "contact_title",
     "company_name",
     "company_domain",
     "company_industry",
@@ -31,6 +35,13 @@ LEAD_COLUMNS = [
     "reason_for_outreach",
     "source",
     "email_source",
+    "email_status",
+    "source_tier",
+    "search_tier",
+    "location_match",
+    "is_dmv",
+    "remote_dmv_eligible",
+    "internship_type",
     "normalized_company_name",
     "normalized_domain",
     "normalized_linkedin_url",
@@ -45,6 +56,13 @@ LEAD_COLUMNS = [
     "notes",
     "status",
     "error_message",
+    "rejection_reason",
+    "discovery_run_id",
+    "queued_send_time",
+    "queue_status",
+    "approved_for_send",
+    "manually_skipped",
+    "manual_review_note",
     "send_attempts",
     "gmail_message_id",
     "created_at",
@@ -83,6 +101,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             email TEXT,
             email_lower TEXT,
             title TEXT,
+            role_title TEXT DEFAULT '',
+            contact_name TEXT DEFAULT '',
+            contact_title TEXT DEFAULT '',
             company_name TEXT,
             company_domain TEXT,
             company_industry TEXT,
@@ -95,6 +116,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             reason_for_outreach TEXT,
             source TEXT DEFAULT 'apollo',
             email_source TEXT DEFAULT '',
+            email_status TEXT DEFAULT '',
+            source_tier TEXT DEFAULT '',
+            search_tier TEXT DEFAULT '',
+            location_match TEXT DEFAULT '',
+            is_dmv INTEGER DEFAULT 0,
+            remote_dmv_eligible INTEGER DEFAULT 0,
+            internship_type TEXT DEFAULT '',
             normalized_company_name TEXT DEFAULT '',
             normalized_domain TEXT DEFAULT '',
             normalized_linkedin_url TEXT DEFAULT '',
@@ -109,6 +137,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             notes TEXT DEFAULT '',
             status TEXT DEFAULT 'pending',
             error_message TEXT DEFAULT '',
+            rejection_reason TEXT DEFAULT '',
+            discovery_run_id INTEGER DEFAULT 0,
+            queued_send_time TEXT DEFAULT '',
+            queue_status TEXT DEFAULT 'not_queued',
+            approved_for_send INTEGER DEFAULT 0,
+            manually_skipped INTEGER DEFAULT 0,
+            manual_review_note TEXT DEFAULT '',
             send_attempts INTEGER DEFAULT 0,
             gmail_message_id TEXT DEFAULT '',
             created_at TEXT,
@@ -136,9 +171,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_sent_at ON leads(sent_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_discovery_run_id ON leads(discovery_run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_queue_status ON leads(queue_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_normalized_domain ON leads(normalized_domain)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_normalized_company ON leads(normalized_company_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_normalized_linkedin ON leads(normalized_linkedin_url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_source_tier ON leads(source_tier)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS apollo_usage (
@@ -154,6 +192,82 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_usage_used_at ON apollo_usage(used_at)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER,
+            event_type TEXT NOT NULL,
+            subject TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            timestamp TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_timestamp ON email_events(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_lead_id ON email_events(lead_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            raw_candidates INTEGER NOT NULL DEFAULT 0,
+            enriched_count INTEGER NOT NULL DEFAULT 0,
+            send_ready_count INTEGER NOT NULL DEFAULT 0,
+            sent_count INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            error_summary TEXT DEFAULT '',
+            details_json TEXT DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_started_at ON automation_runs(started_at)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS apollo_search_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            automation_run_id INTEGER,
+            tier_name TEXT NOT NULL,
+            search_type TEXT NOT NULL,
+            page INTEGER NOT NULL DEFAULT 0,
+            params_json TEXT DEFAULT '{}',
+            result_count INTEGER NOT NULL DEFAULT 0,
+            new_unique_count INTEGER NOT NULL DEFAULT 0,
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_search_logs_run ON apollo_search_logs(automation_run_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS send_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER NOT NULL,
+            scheduled_send_time TEXT NOT NULL,
+            queue_status TEXT NOT NULL DEFAULT 'queued',
+            email_subject TEXT DEFAULT '',
+            email_body TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            failure_reason TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_send_queue_lead_unique
+        ON send_queue(lead_id)
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_status ON send_queue(queue_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_scheduled ON send_queue(scheduled_send_time)")
     conn.commit()
 
 
@@ -163,6 +277,16 @@ def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
     }
     column_defs = {
         "email_source": "TEXT DEFAULT ''",
+        "email_status": "TEXT DEFAULT ''",
+        "source_tier": "TEXT DEFAULT ''",
+        "search_tier": "TEXT DEFAULT ''",
+        "role_title": "TEXT DEFAULT ''",
+        "contact_name": "TEXT DEFAULT ''",
+        "contact_title": "TEXT DEFAULT ''",
+        "location_match": "TEXT DEFAULT ''",
+        "is_dmv": "INTEGER DEFAULT 0",
+        "remote_dmv_eligible": "INTEGER DEFAULT 0",
+        "internship_type": "TEXT DEFAULT ''",
         "normalized_company_name": "TEXT DEFAULT ''",
         "normalized_domain": "TEXT DEFAULT ''",
         "normalized_linkedin_url": "TEXT DEFAULT ''",
@@ -175,6 +299,13 @@ def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
         "reply_received": "INTEGER DEFAULT 0",
         "bounced": "INTEGER DEFAULT 0",
         "notes": "TEXT DEFAULT ''",
+        "rejection_reason": "TEXT DEFAULT ''",
+        "discovery_run_id": "INTEGER DEFAULT 0",
+        "queued_send_time": "TEXT DEFAULT ''",
+        "queue_status": "TEXT DEFAULT 'not_queued'",
+        "approved_for_send": "INTEGER DEFAULT 0",
+        "manually_skipped": "INTEGER DEFAULT 0",
+        "manual_review_note": "TEXT DEFAULT ''",
     }
     for column, definition in column_defs.items():
         if column not in existing_columns:
@@ -201,21 +332,12 @@ def _find_existing_lead(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite
         values.append(lead.linkedin_url)
         checks.append("LOWER(linkedin_url) = ?")
         values.append(lead.linkedin_url.lower())
-    if lead.company_domain:
-        checks.append("LOWER(company_domain) = ?")
-        values.append(lead.company_domain.lower())
-    if lead.company_name:
-        checks.append("LOWER(company_name) = ?")
-        values.append(lead.company_name.lower())
     if lead.normalized_linkedin_url:
         checks.append("normalized_linkedin_url = ?")
         values.append(lead.normalized_linkedin_url)
-    if lead.normalized_domain:
-        checks.append("normalized_domain = ?")
-        values.append(lead.normalized_domain)
-    if lead.normalized_company_name:
-        checks.append("normalized_company_name = ?")
-        values.append(lead.normalized_company_name)
+    if lead.full_name and (lead.normalized_domain or lead.normalized_company_name):
+        checks.append("(LOWER(full_name) = ? AND (normalized_domain = ? OR normalized_company_name = ?))")
+        values.extend([lead.full_name.lower(), lead.normalized_domain, lead.normalized_company_name])
 
     if not checks:
         return None
@@ -252,6 +374,15 @@ def backfill_normalized_keys(conn: sqlite3.Connection) -> None:
                 row["id"],
             ),
         )
+    conn.execute(
+        """
+        UPDATE leads
+        SET contact_name = COALESCE(NULLIF(contact_name, ''), full_name),
+            contact_title = COALESCE(NULLIF(contact_title, ''), title)
+        WHERE contact_name = ''
+           OR contact_title = ''
+        """
+    )
     conn.commit()
 
 
@@ -268,10 +399,12 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
     if existing:
         current_status = existing["status"] or "pending"
         next_status = current_status
-        if current_status == "skipped" and lead.email:
-            next_status = "pending"
-        if current_status == "failed":
-            next_status = "pending"
+        terminal_statuses = {"sent", "bounced", "unsubscribed", "not_relevant"}
+        if current_status not in terminal_statuses:
+            if lead.status in {"queued", "send_ready", "enriched", "raw", "rejected", "skipped"}:
+                next_status = lead.status
+            if current_status == "failed" and lead.status in {"pending", "send_ready", "queued"}:
+                next_status = lead.status
 
         conn.execute(
             """
@@ -283,6 +416,9 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 email = COALESCE(NULLIF(?, ''), email),
                 email_lower = COALESCE(NULLIF(?, ''), email_lower),
                 title = COALESCE(NULLIF(?, ''), title),
+                role_title = COALESCE(NULLIF(?, ''), role_title),
+                contact_name = COALESCE(NULLIF(?, ''), contact_name),
+                contact_title = COALESCE(NULLIF(?, ''), contact_title),
                 company_name = COALESCE(NULLIF(?, ''), company_name),
                 company_domain = COALESCE(NULLIF(?, ''), company_domain),
                 company_industry = COALESCE(NULLIF(?, ''), company_industry),
@@ -295,6 +431,13 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 reason_for_outreach = COALESCE(NULLIF(?, ''), reason_for_outreach),
                 source = COALESCE(NULLIF(?, ''), source),
                 email_source = COALESCE(NULLIF(?, ''), email_source),
+                email_status = COALESCE(NULLIF(?, ''), email_status),
+                source_tier = COALESCE(NULLIF(?, ''), source_tier),
+                search_tier = COALESCE(NULLIF(?, ''), search_tier),
+                location_match = COALESCE(NULLIF(?, ''), location_match),
+                is_dmv = CASE WHEN ? THEN 1 ELSE is_dmv END,
+                remote_dmv_eligible = CASE WHEN ? THEN 1 ELSE remote_dmv_eligible END,
+                internship_type = COALESCE(NULLIF(?, ''), internship_type),
                 normalized_company_name = COALESCE(NULLIF(?, ''), normalized_company_name),
                 normalized_domain = COALESCE(NULLIF(?, ''), normalized_domain),
                 normalized_linkedin_url = COALESCE(NULLIF(?, ''), normalized_linkedin_url),
@@ -309,6 +452,13 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 notes = COALESCE(NULLIF(?, ''), notes),
                 status = ?,
                 error_message = ?,
+                rejection_reason = COALESCE(NULLIF(?, ''), rejection_reason),
+                discovery_run_id = CASE WHEN ? > 0 THEN ? ELSE discovery_run_id END,
+                queued_send_time = COALESCE(NULLIF(?, ''), queued_send_time),
+                queue_status = COALESCE(NULLIF(?, ''), queue_status),
+                approved_for_send = CASE WHEN ? THEN 1 ELSE approved_for_send END,
+                manually_skipped = CASE WHEN ? THEN 1 ELSE manually_skipped END,
+                manual_review_note = COALESCE(NULLIF(?, ''), manual_review_note),
                 updated_at = ?,
                 raw_json = COALESCE(NULLIF(?, '{}'), raw_json)
             WHERE id = ?
@@ -321,6 +471,9 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 lead.email,
                 lead.email_lower,
                 lead.title,
+                lead.role_title,
+                lead.contact_name or lead.full_name,
+                lead.contact_title or lead.title,
                 lead.company_name,
                 lead.company_domain,
                 lead.company_industry,
@@ -333,6 +486,13 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 lead.reason_for_outreach,
                 lead.source,
                 lead.email_source,
+                lead.email_status,
+                lead.source_tier,
+                lead.search_tier or lead.source_tier,
+                lead.location_match,
+                int(lead.is_dmv),
+                int(lead.remote_dmv_eligible),
+                lead.internship_type,
                 lead.normalized_company_name,
                 lead.normalized_domain,
                 lead.normalized_linkedin_url,
@@ -347,7 +507,15 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 int(lead.bounced),
                 lead.notes,
                 next_status,
-                "" if next_status == "pending" else lead.error_message,
+                "" if next_status in {"pending", "send_ready"} else lead.error_message,
+                lead.rejection_reason,
+                int(lead.discovery_run_id or 0),
+                int(lead.discovery_run_id or 0),
+                lead.queued_send_time,
+                lead.queue_status,
+                int(lead.approved_for_send),
+                int(lead.manually_skipped),
+                lead.manual_review_note,
                 now,
                 lead.raw_json,
                 existing["id"],
@@ -360,18 +528,28 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
         """
         INSERT INTO leads (
             apollo_id, first_name, last_name, full_name, email, email_lower,
-            title, company_name, company_domain, company_industry, company_size,
+            title, role_title, contact_name, contact_title,
+            company_name, company_domain, company_industry, company_size,
             linkedin_url, city, state, country, apollo_url, reason_for_outreach,
-            source, email_source, normalized_company_name, normalized_domain,
+            source, email_source, email_status, source_tier,
+            search_tier,
+            location_match, is_dmv, remote_dmv_eligible,
+            internship_type, normalized_company_name, normalized_domain,
             normalized_linkedin_url, lead_score, score_breakdown, apollo_used,
             apollo_credits_used, last_contacted_date, email_sent, reply_received,
-            bounced, notes, status, error_message, send_attempts, gmail_message_id,
+            bounced, notes, status, error_message, rejection_reason,
+            discovery_run_id, queued_send_time, queue_status, approved_for_send,
+            manually_skipped, manual_review_note,
+            send_attempts, gmail_message_id,
             created_at, updated_at, sent_at, skipped_at, raw_json
         )
         VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            0, '', ?, ?, NULL, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?
         )
         """,
         (
@@ -382,6 +560,9 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
             lead.email,
             lead.email_lower,
             lead.title,
+            lead.role_title,
+            lead.contact_name or lead.full_name,
+            lead.contact_title or lead.title,
             lead.company_name,
             lead.company_domain,
             lead.company_industry,
@@ -394,6 +575,13 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
             lead.reason_for_outreach,
             lead.source,
             lead.email_source,
+            lead.email_status,
+            lead.source_tier,
+            lead.search_tier or lead.source_tier,
+            lead.location_match,
+            int(lead.is_dmv),
+            int(lead.remote_dmv_eligible),
+            lead.internship_type,
             lead.normalized_company_name,
             lead.normalized_domain,
             lead.normalized_linkedin_url,
@@ -408,14 +596,54 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
             lead.notes,
             lead.status,
             lead.error_message,
+            lead.rejection_reason,
+            int(lead.discovery_run_id or 0),
+            lead.queued_send_time,
+            lead.queue_status,
+            int(lead.approved_for_send),
+            int(lead.manually_skipped),
+            lead.manual_review_note,
+            0,
+            "",
             now,
             now,
+            now if lead.status == "sent" else None,
             now if lead.status == "skipped" else None,
             lead.raw_json,
         ),
     )
     conn.commit()
     return "inserted"
+
+
+def update_lead_dmv_fields(conn: sqlite3.Connection, lead_id: int, lead: Lead) -> None:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE leads
+        SET role_title = COALESCE(NULLIF(?, ''), role_title),
+            contact_name = COALESCE(NULLIF(?, ''), contact_name),
+            contact_title = COALESCE(NULLIF(?, ''), contact_title),
+            location_match = ?,
+            is_dmv = ?,
+            remote_dmv_eligible = ?,
+            internship_type = COALESCE(NULLIF(?, ''), internship_type),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            lead.role_title,
+            lead.contact_name or lead.full_name,
+            lead.contact_title or lead.title,
+            lead.location_match,
+            int(lead.is_dmv),
+            int(lead.remote_dmv_eligible),
+            lead.internship_type,
+            now,
+            lead_id,
+        ),
+    )
+    conn.commit()
 
 
 def find_existing_lead(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite3.Row]:
@@ -438,18 +666,9 @@ def blocking_match(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite3.Row
     if lead.linkedin_url:
         checks.append("LOWER(linkedin_url) = ?")
         values.append(lead.linkedin_url.lower())
-    if lead.normalized_domain:
-        checks.append("normalized_domain = ?")
-        values.append(lead.normalized_domain)
-    if lead.company_domain:
-        checks.append("LOWER(company_domain) = ?")
-        values.append(lead.company_domain.lower())
-    if lead.normalized_company_name:
-        checks.append("normalized_company_name = ?")
-        values.append(lead.normalized_company_name)
-    if lead.company_name:
-        checks.append("LOWER(company_name) = ?")
-        values.append(lead.company_name.lower())
+    if lead.full_name and (lead.normalized_domain or lead.normalized_company_name):
+        checks.append("(LOWER(full_name) = ? AND (normalized_domain = ? OR normalized_company_name = ?))")
+        values.extend([lead.full_name.lower(), lead.normalized_domain, lead.normalized_company_name])
 
     if not checks:
         return None
@@ -475,14 +694,91 @@ def get_pending_leads(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]
         """
         SELECT *
         FROM leads
-        WHERE status = 'pending'
+        WHERE status IN ('pending', 'send_ready', 'queued')
           AND email_lower IS NOT NULL
           AND email_lower != ''
+          AND is_dmv = 1
+          AND COALESCE(manually_skipped, 0) = 0
         ORDER BY lead_score DESC, created_at ASC, id ASC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
+
+
+def count_send_ready_pending(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM leads
+        WHERE status IN ('pending', 'send_ready', 'queued')
+          AND email_lower IS NOT NULL
+          AND email_lower != ''
+          AND is_dmv = 1
+          AND COALESCE(manually_skipped, 0) = 0
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def get_send_queue_candidates(conn: sqlite3.Connection, limit: int, min_score: int) -> list[sqlite3.Row]:
+    """Return leads explicitly queued for the morning sender."""
+
+    queued_rows = conn.execute(
+        """
+        SELECT
+            l.*,
+            q.id AS send_queue_id,
+            q.scheduled_send_time AS queue_scheduled_send_time,
+            q.email_subject AS queue_email_subject,
+            q.email_body AS queue_email_body,
+            q.failure_reason AS queue_failure_reason
+        FROM send_queue q
+        JOIN leads l ON l.id = q.lead_id
+        WHERE q.queue_status = 'queued'
+          AND l.queue_status = 'queued'
+          AND l.status IN ('queued', 'send_ready')
+          AND COALESCE(l.approved_for_send, 0) = 1
+          AND COALESCE(l.manually_skipped, 0) = 0
+          AND COALESCE(l.email_sent, 0) = 0
+          AND COALESCE(l.lead_score, 0) >= ?
+          AND l.email_lower IS NOT NULL
+          AND l.email_lower != ''
+        ORDER BY l.lead_score DESC, q.created_at ASC, l.id ASC
+        LIMIT ?
+        """,
+        (min_score, limit),
+    ).fetchall()
+
+    if len(queued_rows) >= limit:
+        return queued_rows
+
+    queued_ids = {int(row["id"]) for row in queued_rows}
+    remaining = limit - len(queued_rows)
+    fallback_rows = conn.execute(
+        """
+        SELECT
+            l.*,
+            NULL AS send_queue_id,
+            l.queued_send_time AS queue_scheduled_send_time,
+            '' AS queue_email_subject,
+            '' AS queue_email_body,
+            '' AS queue_failure_reason
+        FROM leads l
+        WHERE l.status IN ('queued', 'send_ready')
+          AND l.queue_status = 'queued'
+          AND COALESCE(l.approved_for_send, 0) = 1
+          AND COALESCE(l.manually_skipped, 0) = 0
+          AND COALESCE(l.email_sent, 0) = 0
+          AND COALESCE(l.lead_score, 0) >= ?
+          AND l.email_lower IS NOT NULL
+          AND l.email_lower != ''
+        ORDER BY l.lead_score DESC, l.created_at ASC, l.id ASC
+        LIMIT ?
+        """,
+        (min_score, remaining),
+    ).fetchall()
+    return queued_rows + [row for row in fallback_rows if int(row["id"]) not in queued_ids]
 
 
 def mark_sent(conn: sqlite3.Connection, lead_id: int, gmail_message_id: str) -> None:
@@ -496,6 +792,7 @@ def mark_sent(conn: sqlite3.Connection, lead_id: int, gmail_message_id: str) -> 
             send_attempts = send_attempts + 1,
             last_contacted_date = ?,
             email_sent = 1,
+            queue_status = 'sent',
             sent_at = ?,
             updated_at = ?
         WHERE id = ?
@@ -512,6 +809,7 @@ def mark_failed(conn: sqlite3.Connection, lead_id: int, error_message: str) -> N
         UPDATE leads
         SET status = 'failed',
             error_message = ?,
+            queue_status = 'failed',
             send_attempts = send_attempts + 1,
             updated_at = ?
         WHERE id = ?
@@ -528,11 +826,13 @@ def mark_skipped(conn: sqlite3.Connection, lead_id: int, reason: str) -> None:
         UPDATE leads
         SET status = 'skipped',
             error_message = ?,
+            rejection_reason = ?,
+            queue_status = 'skipped',
             skipped_at = ?,
             updated_at = ?
         WHERE id = ?
         """,
-        (reason[:1000], now, now, lead_id),
+        (reason[:1000], reason[:1000], now, now, lead_id),
     )
     conn.commit()
 
@@ -555,11 +855,12 @@ def update_lead_quality(
                 score_breakdown = ?,
                 status = ?,
                 error_message = ?,
+                rejection_reason = COALESCE(NULLIF(?, ''), rejection_reason),
                 notes = COALESCE(NULLIF(?, ''), notes),
                 updated_at = ?
             WHERE id = ?
             """,
-            (lead_score, score_breakdown, status, error_message[:1000], notes, now, lead_id),
+            (lead_score, score_breakdown, status, error_message[:1000], error_message[:1000], notes, now, lead_id),
         )
     else:
         conn.execute(
@@ -734,3 +1035,223 @@ def lead_matches_blocklist(lead: Lead, block_items: set[str]) -> bool:
 
 def lead_matches_identity_keys(lead: Lead, keys: set[str]) -> bool:
     return lead_matches_blocklist(lead, keys)
+
+
+def company_contact_count_this_week(conn: sqlite3.Connection, lead: Lead) -> int:
+    lead.refresh_normalized_fields()
+    if not lead.normalized_domain and not lead.normalized_company_name:
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM leads
+        WHERE (normalized_domain = ? OR normalized_company_name = ?)
+          AND status IN ('pending', 'send_ready', 'queued', 'sent')
+          AND date(COALESCE(NULLIF(last_contacted_date, ''), sent_at, created_at), 'localtime')
+              >= date('now', '-7 days', 'localtime')
+        """,
+        (lead.normalized_domain, lead.normalized_company_name),
+    ).fetchone()
+    return int(row["count"])
+
+
+def start_automation_run(conn: sqlite3.Connection, run_type: str, details: Optional[dict] = None) -> int:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO automation_runs (run_type, started_at, status, details_json)
+        VALUES (?, ?, 'running', ?)
+        """,
+        (run_type, now, json.dumps(details or {}, sort_keys=True)),
+    )
+    conn.commit()
+    return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+
+def complete_automation_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    status: str,
+    counts: dict,
+    error_summary: str = "",
+    details: Optional[dict] = None,
+) -> None:
+    now = utc_now_iso()
+    skipped_count = counts.get(
+        "skipped_total",
+        sum(
+            int(value)
+            for key, value in counts.items()
+            if key.startswith("skipped") or key.startswith("rejected")
+        ),
+    )
+    run_details = {"counts": counts}
+    if details:
+        run_details.update(details)
+    conn.execute(
+        """
+        UPDATE automation_runs
+        SET completed_at = ?,
+            status = ?,
+            raw_candidates = ?,
+            enriched_count = ?,
+            send_ready_count = ?,
+            sent_count = ?,
+            skipped_count = ?,
+            failed_count = ?,
+            error_summary = ?,
+            details_json = ?
+        WHERE id = ?
+        """,
+        (
+            now,
+            status,
+            int(counts.get("searched", counts.get("raw_candidates", 0)) or 0),
+            int(counts.get("enriched", counts.get("enriched_count", 0)) or 0),
+            int(counts.get("send_ready", counts.get("pending", counts.get("send_ready_count", 0))) or 0),
+            int(counts.get("sent", counts.get("sent_count", 0)) or 0),
+            int(skipped_count or 0),
+            int(counts.get("failed", counts.get("failed_count", 0)) or 0),
+            error_summary[:2000],
+            json.dumps(run_details, sort_keys=True, default=str),
+            run_id,
+        ),
+    )
+    conn.commit()
+
+
+def record_email_event(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    event_type: str,
+    subject: str = "",
+    error_message: str = "",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO email_events (lead_id, event_type, subject, error_message, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (lead_id, event_type, subject[:500], error_message[:1000], utc_now_iso()),
+    )
+    conn.commit()
+
+
+def queue_lead_for_send(
+    conn: sqlite3.Connection,
+    lead: Lead,
+    scheduled_send_time: str,
+    email_subject: str,
+    email_body: str,
+) -> Optional[int]:
+    """Add or refresh a lead in the explicit 8 AM send queue."""
+
+    existing = _find_existing_lead(conn, lead)
+    if not existing:
+        return None
+    lead_id = int(existing["id"])
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE leads
+        SET status = 'queued',
+            queue_status = 'queued',
+            queued_send_time = ?,
+            approved_for_send = 1,
+            manually_skipped = 0,
+            updated_at = ?
+        WHERE id = ?
+          AND COALESCE(email_sent, 0) = 0
+          AND status NOT IN ('sent', 'bounced', 'unsubscribed', 'not_relevant')
+        """,
+        (scheduled_send_time, now, lead_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO send_queue (
+            lead_id, scheduled_send_time, queue_status, email_subject, email_body,
+            created_at, updated_at, failure_reason
+        )
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, '')
+        ON CONFLICT(lead_id) DO UPDATE SET
+            scheduled_send_time = excluded.scheduled_send_time,
+            queue_status = 'queued',
+            email_subject = excluded.email_subject,
+            email_body = excluded.email_body,
+            updated_at = excluded.updated_at,
+            failure_reason = ''
+        """,
+        (lead_id, scheduled_send_time, email_subject[:500], email_body, now, now),
+    )
+    conn.commit()
+    return lead_id
+
+
+def update_send_queue_status(
+    conn: sqlite3.Connection,
+    lead_id: int,
+    queue_status: str,
+    failure_reason: str = "",
+    send_queue_id: Optional[int] = None,
+) -> None:
+    now = utc_now_iso()
+    if send_queue_id:
+        conn.execute(
+            """
+            UPDATE send_queue
+            SET queue_status = ?,
+                failure_reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (queue_status, failure_reason[:1000], now, send_queue_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE send_queue
+            SET queue_status = ?,
+                failure_reason = ?,
+                updated_at = ?
+            WHERE lead_id = ?
+            """,
+            (queue_status, failure_reason[:1000], now, lead_id),
+        )
+    conn.execute(
+        """
+        UPDATE leads
+        SET queue_status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (queue_status, now, lead_id),
+    )
+    conn.commit()
+
+
+def record_search_logs(conn: sqlite3.Connection, run_id: int, logs: list[dict]) -> None:
+    now = utc_now_iso()
+    for item in logs:
+        conn.execute(
+            """
+            INSERT INTO apollo_search_logs (
+                automation_run_id, tier_name, search_type, page, params_json,
+                result_count, new_unique_count, accepted_count, rejected_count, notes, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                item.get("tier", ""),
+                item.get("search_type", ""),
+                int(item.get("page", 0) or 0),
+                json.dumps(item.get("params", {}), sort_keys=True),
+                int(item.get("result_count", 0) or 0),
+                int(item.get("new_unique_count", 0) or 0),
+                int(item.get("accepted_count", 0) or 0),
+                int(item.get("rejected_count", 0) or 0),
+                item.get("description", "")[:1000],
+                now,
+            ),
+        )
+    conn.commit()

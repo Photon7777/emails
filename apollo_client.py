@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from urllib.parse import urlparse
 
 import requests
@@ -10,6 +11,7 @@ from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait
 
 from config import Settings, validate_apollo_settings
 from lead import Lead, raw_to_json
+from search_tiers import SearchTier, build_search_tiers
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,23 @@ def _first_nonempty(*values) -> str:
     return ""
 
 
+def _title_text(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return _first_nonempty(value.get("title"), value.get("name"), value.get("job_title"))
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            text = _title_text(item)
+            if text:
+                parts.append(text)
+        return ", ".join(parts)
+    return str(value).strip()
+
+
 def _add_list_param(params: dict, key: str, values: list[str]) -> None:
     if values:
         params[key] = values
@@ -47,6 +66,7 @@ class ApolloClient:
         validate_apollo_settings(settings)
         self.settings = settings
         self.session = requests.Session()
+        self.search_debug: list[dict] = []
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -103,17 +123,19 @@ class ApolloClient:
         page: int,
         per_page: int,
         organization_ids=None,
+        tier: SearchTier | None = None,
+        keyword_query: str = "",
     ) -> dict:
         params = {
             "page": page,
             "per_page": per_page,
             "include_similar_titles": str(self.settings.apollo_include_similar_titles).lower(),
         }
-        _add_list_param(params, "person_titles[]", self.settings.apollo_job_titles)
-        _add_list_param(params, "person_locations[]", self.settings.apollo_person_locations)
-        _add_list_param(params, "q_organization_job_titles[]", self.settings.apollo_target_job_titles)
-        _add_list_param(params, "organization_job_locations[]", self.settings.apollo_target_job_locations)
-        _add_list_param(params, "organization_locations[]", self.settings.apollo_locations)
+        _add_list_param(params, "person_titles[]", tier.person_titles if tier else self.settings.apollo_job_titles)
+        _add_list_param(params, "person_locations[]", tier.person_locations if tier else self.settings.apollo_person_locations)
+        _add_list_param(params, "q_organization_job_titles[]", tier.target_job_titles if tier else self.settings.apollo_target_job_titles)
+        _add_list_param(params, "organization_job_locations[]", tier.target_job_locations if tier else self.settings.apollo_target_job_locations)
+        _add_list_param(params, "organization_locations[]", tier.organization_locations if tier else self.settings.apollo_locations)
         _add_list_param(
             params,
             "organization_num_employees_ranges[]",
@@ -123,43 +145,58 @@ class ApolloClient:
         if organization_ids:
             _add_list_param(params, "organization_ids[]", organization_ids)
 
-        keyword_parts = list(self.settings.apollo_keywords)
-        if keyword_parts:
-            params["q_keywords"] = " ".join(keyword_parts)
+        keyword_text = keyword_query.strip()
+        if not keyword_text:
+            keyword_parts = list(tier.keywords if tier else self.settings.apollo_keywords)
+            keyword_text = " ".join(keyword_parts)
+        if keyword_text:
+            params["q_keywords"] = keyword_text
         return params
 
-    def _organization_search_params(self, page: int, per_page: int) -> dict:
+    def _organization_search_params(self, page: int, per_page: int, tier: SearchTier | None = None) -> dict:
         params = {
             "page": page,
             "per_page": per_page,
         }
-        _add_list_param(params, "organization_locations[]", self.settings.apollo_locations)
+        _add_list_param(params, "organization_locations[]", tier.organization_locations if tier else self.settings.apollo_locations)
         _add_list_param(
             params,
             "organization_num_employees_ranges[]",
             self.settings.apollo_company_size_ranges,
         )
-        keyword_tags = self.settings.apollo_industries + self.settings.apollo_keywords
+        keyword_tags = self.settings.apollo_industries + (tier.organization_keywords if tier else self.settings.apollo_keywords)
         _add_list_param(params, "q_organization_keyword_tags[]", keyword_tags)
         return params
 
-    def search_organizations(self) -> list[str]:
+    def search_organizations(self, tier: SearchTier | None = None) -> list[str]:
         """Find organization IDs for stricter company/industry filtering."""
 
         organization_ids: list[str] = []
-        if not self.settings.apollo_use_organization_prefilter:
+        if not self.settings.apollo_use_organization_prefilter and not (tier and tier.organization_first):
             return organization_ids
 
         url = f"{self.settings.apollo_base_url}/mixed_companies/search"
-        logger.info("Searching Apollo organizations before people search")
+        logger.info("Searching Apollo organizations before people search%s", f" for {tier.name}" if tier else "")
 
         for page in range(1, self.settings.apollo_fetch_max_pages + 1):
+            params = self._organization_search_params(page, self.settings.apollo_fetch_per_page, tier=tier)
             data = self._request(
                 "POST",
                 url,
-                params=self._organization_search_params(page, self.settings.apollo_fetch_per_page),
+                params=params,
             )
             organizations = data.get("organizations") or data.get("accounts") or []
+            if tier:
+                self.search_debug.append(
+                    {
+                        "tier": tier.name,
+                        "description": tier.description,
+                        "search_type": "organization",
+                        "page": page,
+                        "params": deepcopy(params),
+                        "result_count": len(organizations),
+                    }
+                )
             if not organizations:
                 break
 
@@ -175,33 +212,112 @@ class ApolloClient:
 
         return organization_ids
 
-    def search_people(self) -> list[dict]:
-        """Search Apollo for people matching the filters in .env."""
+    def _candidate_key(self, person: dict) -> str:
+        organization = person.get("organization") or person.get("account") or {}
+        company = _first_nonempty(
+            organization.get("name"),
+            person.get("organization_name"),
+            person.get("company_name"),
+        ).lower()
+        return "|".join(
+            part
+            for part in [
+                _first_nonempty(person.get("id"), person.get("person_id")),
+                _first_nonempty(person.get("email"), person.get("work_email"), person.get("primary_email")).lower(),
+                _first_nonempty(person.get("linkedin_url"), person.get("person_linkedin_url")).lower(),
+                f"{_first_nonempty(person.get('name'), person.get('full_name')).lower()}@{company}",
+            ]
+            if part
+        )
+
+    def search_people_for_tier(self, tier: SearchTier, target_count: int, seen_keys: set[str]) -> list[dict]:
+        """Search one Apollo tier and return new unique candidates."""
 
         url = f"{self.settings.apollo_base_url}/mixed_people/api_search"
-        organization_ids = self.search_organizations()
-        if self.settings.apollo_use_organization_prefilter and not organization_ids:
-            logger.warning("Organization prefilter found no companies; skipping people search")
+        organization_ids = self.search_organizations(tier)
+        if tier.organization_first and not organization_ids:
+            logger.warning("Organization-first tier %s found no companies; skipping people search", tier.name)
             return []
 
         people: list[dict] = []
-        for page in range(1, self.settings.apollo_fetch_max_pages + 1):
-            logger.info("Searching Apollo people page %s", page)
-            data = self._request(
-                "POST",
-                url,
-                params=self._people_search_params(
+        raw_count = 0
+        keyword_queries = tier.keyword_queries or [" ".join(tier.keywords)]
+        for keyword_query in keyword_queries:
+            if len(people) >= target_count:
+                break
+            for page in range(1, self.settings.apollo_fetch_max_pages + 1):
+                logger.info(
+                    "Searching Apollo %s people page %s for %r",
+                    tier.name,
+                    page,
+                    keyword_query,
+                )
+                params = self._people_search_params(
                     page=page,
                     per_page=self.settings.apollo_fetch_per_page,
                     organization_ids=organization_ids or None,
-                ),
-            )
-            page_people = data.get("people") or data.get("contacts") or []
-            if not page_people:
-                break
-            people.extend(page_people)
+                    tier=tier,
+                    keyword_query=keyword_query,
+                )
+                data = self._request("POST", url, params=params)
+                page_people = data.get("people") or data.get("contacts") or []
+                raw_count += len(page_people)
+                new_count = 0
 
-        logger.info("Apollo people search returned %s raw people", len(people))
+                for person in page_people:
+                    key = self._candidate_key(person)
+                    if key and key in seen_keys:
+                        continue
+                    if key:
+                        seen_keys.add(key)
+                    person["_apollo_search_tier"] = tier.name
+                    person["_apollo_search_description"] = tier.description
+                    people.append(person)
+                    new_count += 1
+
+                self.search_debug.append(
+                    {
+                        "tier": tier.name,
+                        "description": tier.description,
+                        "search_type": "people",
+                        "page": page,
+                        "params": deepcopy(params),
+                        "result_count": len(page_people),
+                        "new_unique_count": new_count,
+                    }
+                )
+                if not page_people or len(people) >= target_count:
+                    break
+
+        logger.info(
+            "Apollo %s returned %s raw people and %s new unique people",
+            tier.name,
+            raw_count,
+            len(people),
+        )
+        return people
+
+    def search_people(self, target_count: int | None = None) -> list[dict]:
+        """Search Apollo with fallback tiers until enough unique candidates exist."""
+
+        self.search_debug = []
+        target = target_count or max(
+            self.settings.pending_inventory_target,
+            self.settings.daily_send_target_min,
+            self.settings.daily_send_limit,
+            self.settings.apollo_fetch_per_page,
+        )
+        target = max(target, 1)
+
+        people: list[dict] = []
+        seen_keys: set[str] = set()
+        for tier in build_search_tiers(self.settings):
+            tier_people = self.search_people_for_tier(tier, target, seen_keys)
+            people.extend(tier_people)
+            if len(people) >= target:
+                break
+
+        logger.info("Apollo tiered people search returned %s unique raw candidates", len(people))
         return people
 
     def enrich_lead(self, lead: Lead) -> Lead:
@@ -284,6 +400,19 @@ class ApolloClient:
         )
 
         title = _first_nonempty(person.get("title"), person.get("headline"))
+        email_status = _first_nonempty(
+            person.get("email_status"),
+            person.get("email_status_cd"),
+            person.get("contact_email_status"),
+        )
+        role_title = _first_nonempty(
+            _title_text(person.get("organization_job_title")),
+            _title_text(person.get("organization_job_titles")),
+            _title_text(person.get("job_title")),
+            _title_text(person.get("job_titles")),
+            _title_text(person.get("current_job_title")),
+            _title_text(person.get("employment_history")),
+        )
         reason = self._build_reason(company_name, company_industry, title)
 
         return Lead(
@@ -298,6 +427,9 @@ class ApolloClient:
                 person.get("primary_email"),
             ),
             title=title,
+            email_status=email_status,
+            source_tier=_first_nonempty(person.get("_apollo_search_tier")),
+            role_title=role_title,
             company_name=company_name,
             company_domain=company_domain,
             company_industry=company_industry,

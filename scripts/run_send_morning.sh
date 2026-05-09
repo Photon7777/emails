@@ -15,5 +15,5 @@ else
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting morning Gmail send"
-"$PYTHON" main.py send --live >> logs/send.log 2>&1
+"$PYTHON" run_sender.py --live >> logs/send.log 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Finished morning Gmail send"
