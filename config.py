@@ -103,6 +103,7 @@ class Settings:
     max_retries: int
 
     database_path: Path
+    database_url: str
     leads_csv_path: Path
     email_preview_path: Path
     suppression_list_path: Path
@@ -176,6 +177,7 @@ def load_settings() -> Settings:
         delay_between_emails_seconds=_get_int("DELAY_BETWEEN_EMAILS_SECONDS", 45),
         max_retries=_get_int("MAX_RETRIES", 3),
         database_path=_path_from_env("DATABASE_PATH", "data/leads.sqlite"),
+        database_url=_get_str("DATABASE_URL"),
         leads_csv_path=_path_from_env("LEADS_CSV_PATH", "data/leads_export.csv"),
         email_preview_path=_path_from_env("EMAIL_PREVIEW_PATH", "data/email_previews.txt"),
         suppression_list_path=_path_from_env("SUPPRESSION_LIST_PATH", "data/suppression_list.txt"),

@@ -33,7 +33,7 @@ class ColdEmailWorkflow:
         ensure_local_folders(settings)
 
     def init_db(self) -> None:
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
         logger.info("SQLite database is ready at %s", self.settings.database_path)
@@ -71,7 +71,7 @@ class ColdEmailWorkflow:
             "rejected_low_score": 0,
             "rejected_below_send_score": 0,
         }
-        with db.connect(settings.database_path) as conn:
+        with db.connect(settings.database_path, settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             run_id = db.start_automation_run(
@@ -329,7 +329,7 @@ class ColdEmailWorkflow:
     def preview_emails(self, limit: int = 3, output_path=None) -> None:
         """Print rendered emails without sending anything and save a preview file."""
 
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             leads = db.get_pending_leads(conn, limit)
@@ -376,7 +376,7 @@ class ColdEmailWorkflow:
         counts = {"sent": 0, "failed": 0, "skipped": 0, "dry_run": 0}
         attachment_paths = self._attachment_paths()
 
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             run_id = db.start_automation_run(
@@ -594,7 +594,7 @@ class ColdEmailWorkflow:
         """Apply the current quality gates to already-queued leads."""
 
         counts = {"rescored": 0, "rejected": 0, "blocked": 0, "non_dmv": 0, "duplicate_pending": 0}
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             suppression_items = db.read_suppression_list(self.settings.suppression_list_path)
@@ -770,14 +770,14 @@ class ColdEmailWorkflow:
         return True
 
     def export_csv(self) -> None:
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             db.export_to_csv(conn, self.settings.leads_csv_path)
         logger.info("Exported lead CSV to %s", self.settings.leads_csv_path)
 
     def status_report(self) -> dict[str, int]:
-        with db.connect(self.settings.database_path) as conn:
+        with db.connect(self.settings.database_path, self.settings.database_url) as conn:
             db.init_db(conn)
             db.backfill_normalized_keys(conn)
             counts = db.status_counts(conn)

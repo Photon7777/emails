@@ -3,6 +3,7 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 pandas==2.2.3
 plotly==6.0.1
+psycopg[binary]==3.2.9
 python-dotenv==1.1.0
 requests==2.32.3
 streamlit==1.45.0

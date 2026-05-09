@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -21,9 +20,10 @@ settings = load_settings()
 
 @st.cache_data(ttl=20)
 def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
-    with db.connect(settings.database_path) as conn:
+    with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
-        return pd.read_sql_query(query, conn, params=params)
+        rows = conn.execute(query, params).fetchall()
+        return pd.DataFrame([dict(row) for row in rows])
 
 
 def metric_card(label: str, value, help_text: str = "") -> None:
@@ -101,7 +101,7 @@ def load_latest_discovery_run(selected_date: date) -> pd.DataFrame:
         SELECT *
         FROM automation_runs
         WHERE run_type = 'discovery'
-          AND date(started_at, 'localtime') = ?
+          AND substr(started_at, 1, 10) = ?
         ORDER BY started_at DESC, id DESC
         LIMIT 1
         """,
@@ -114,7 +114,7 @@ def load_daily_review_leads(selected_date: date, run_id: int | None) -> pd.DataF
         where_clause = "l.discovery_run_id = ?"
         params = (run_id,)
     else:
-        where_clause = "date(l.created_at, 'localtime') = ?"
+        where_clause = "substr(l.created_at, 1, 10) = ?"
         params = (selected_date.isoformat(),)
     return read_sql(
         f"""
@@ -182,7 +182,7 @@ def next_8am_iso() -> str:
 
 
 def get_lead_row(lead_id: int):
-    with db.connect(settings.database_path) as conn:
+    with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         return conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
 
@@ -190,7 +190,7 @@ def get_lead_row(lead_id: int):
 def mark_manual_skip(lead_id: int, note: str) -> None:
     reason = note.strip() or "Manually skipped in Daily Discovery Review"
     now = utc_now_iso()
-    with db.connect(settings.database_path) as conn:
+    with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         conn.execute(
             """
@@ -224,7 +224,7 @@ def mark_manual_skip(lead_id: int, note: str) -> None:
 def remove_from_queue(lead_id: int, note: str) -> None:
     reason = note.strip() or "Removed from 8 AM queue in Daily Discovery Review"
     now = utc_now_iso()
-    with db.connect(settings.database_path) as conn:
+    with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         conn.execute(
             """
@@ -269,7 +269,7 @@ def approve_for_queue(lead_id: int, note: str = "") -> tuple[bool, str]:
     lead.approved_for_send = True
     lead.manual_review_note = note.strip()
     subject, body = render_email(lead, settings)
-    with db.connect(settings.database_path) as conn:
+    with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         db.upsert_lead(conn, lead)
         queued_id = db.queue_lead_for_send(conn, lead, next_8am_iso(), subject, body)
@@ -663,15 +663,17 @@ def overview() -> None:
             COALESCE(SUM(skipped_count), 0) AS skipped_count,
             COALESCE(SUM(failed_count), 0) AS failed_count
         FROM automation_runs
-        WHERE date(started_at, 'localtime') = date('now', 'localtime')
-        """
+        WHERE substr(started_at, 1, 10) = ?
+        """,
+        (date.today().isoformat(),),
     ).iloc[0]
     credits = read_sql(
         """
         SELECT COALESCE(SUM(credits), 0) AS credits
         FROM apollo_usage
-        WHERE date(used_at, 'localtime') = date('now', 'localtime')
-        """
+        WHERE substr(used_at, 1, 10) = ?
+        """,
+        (date.today().isoformat(),),
     ).iloc[0]["credits"]
     sent_today = int(today_runs["sent_count"])
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
@@ -706,7 +708,7 @@ def overview() -> None:
         else:
             daily = read_sql(
                 """
-                SELECT date(started_at, 'localtime') AS day, COALESCE(SUM(sent_count), 0) AS sent
+                SELECT substr(started_at, 1, 10) AS day, COALESCE(SUM(sent_count), 0) AS sent
                 FROM automation_runs
                 GROUP BY day
                 ORDER BY day

@@ -1,14 +1,27 @@
-"""SQLite storage for leads and email status tracking."""
+"""Storage for leads and email status tracking.
+
+SQLite is the default local backend. When DATABASE_URL is set to a Postgres
+connection string, the same workflow uses the cloud Postgres database instead.
+"""
 
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timedelta
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from lead import Lead, normalize_company_name, normalize_domain, normalize_linkedin_url, utc_now_iso
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # Postgres support is optional unless DATABASE_URL is set.
+    psycopg = None
+    dict_row = None
 
 
 LEAD_COLUMNS = [
@@ -82,7 +95,73 @@ BLOCKING_STATUSES = {
 }
 
 
-def connect(database_path: Path) -> sqlite3.Connection:
+POSTGRES_SCHEMES = ("postgres://", "postgresql://", "postgresql+psycopg2://", "postgresql+psycopg://")
+
+
+def _database_url_from_env() -> str:
+    return os.getenv("DATABASE_URL", "").strip()
+
+
+def _is_postgres_url(database_url: str) -> bool:
+    return database_url.startswith(POSTGRES_SCHEMES)
+
+
+def _normalize_postgres_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+psycopg2://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    if database_url.startswith("postgresql+psycopg://"):
+        return "postgresql://" + database_url.split("://", 1)[1]
+    return database_url
+
+
+def _adapt_sql_for_postgres(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+class PostgresConnection:
+    is_postgres = True
+
+    def __init__(self, database_url: str):
+        if psycopg is None:
+            raise RuntimeError("DATABASE_URL is set, but psycopg[binary] is not installed.")
+        self.database_url = _normalize_postgres_url(database_url)
+        self._conn = psycopg.connect(self.database_url, row_factory=dict_row)
+
+    def execute(self, sql: str, params=()):
+        cursor = self._conn.cursor()
+        cursor.execute(_adapt_sql_for_postgres(sql), params or ())
+        return cursor
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        self.close()
+
+
+def is_postgres_connection(conn) -> bool:
+    return bool(getattr(conn, "is_postgres", False))
+
+
+def connect(database_path: Path, database_url: str = ""):
+    database_url = database_url or _database_url_from_env()
+    if database_url:
+        if not _is_postgres_url(database_url):
+            raise ValueError("DATABASE_URL must start with postgres:// or postgresql://.")
+        return PostgresConnection(database_url)
     database_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(database_path)
     conn.row_factory = sqlite3.Row
@@ -90,10 +169,11 @@ def connect(database_path: Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    id_column = "SERIAL PRIMARY KEY" if is_postgres_connection(conn) else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS leads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             apollo_id TEXT,
             first_name TEXT,
             last_name TEXT,
@@ -127,7 +207,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             normalized_domain TEXT DEFAULT '',
             normalized_linkedin_url TEXT DEFAULT '',
             lead_score INTEGER DEFAULT 0,
-            score_breakdown TEXT DEFAULT '{}',
+            score_breakdown TEXT DEFAULT '{{}}',
             apollo_used INTEGER DEFAULT 0,
             apollo_credits_used INTEGER DEFAULT 0,
             last_contacted_date TEXT DEFAULT '',
@@ -150,7 +230,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             updated_at TEXT,
             sent_at TEXT,
             skipped_at TEXT,
-            raw_json TEXT DEFAULT '{}'
+            raw_json TEXT DEFAULT '{{}}'
         )
         """
     )
@@ -178,9 +258,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_normalized_linkedin ON leads(normalized_linkedin_url)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_source_tier ON leads(source_tier)")
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS apollo_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             used_at TEXT NOT NULL,
             operation TEXT NOT NULL,
             credits INTEGER NOT NULL DEFAULT 0,
@@ -193,9 +273,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_usage_used_at ON apollo_usage(used_at)")
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS email_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             lead_id INTEGER,
             event_type TEXT NOT NULL,
             subject TEXT DEFAULT '',
@@ -207,9 +287,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_timestamp ON email_events(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_lead_id ON email_events(lead_id)")
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS automation_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             run_type TEXT NOT NULL,
             started_at TEXT NOT NULL,
             completed_at TEXT DEFAULT '',
@@ -221,20 +301,20 @@ def init_db(conn: sqlite3.Connection) -> None:
             skipped_count INTEGER NOT NULL DEFAULT 0,
             failed_count INTEGER NOT NULL DEFAULT 0,
             error_summary TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
+            details_json TEXT DEFAULT '{{}}'
         )
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_started_at ON automation_runs(started_at)")
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS apollo_search_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             automation_run_id INTEGER,
             tier_name TEXT NOT NULL,
             search_type TEXT NOT NULL,
             page INTEGER NOT NULL DEFAULT 0,
-            params_json TEXT DEFAULT '{}',
+            params_json TEXT DEFAULT '{{}}',
             result_count INTEGER NOT NULL DEFAULT 0,
             new_unique_count INTEGER NOT NULL DEFAULT 0,
             accepted_count INTEGER NOT NULL DEFAULT 0,
@@ -246,9 +326,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_search_logs_run ON apollo_search_logs(automation_run_id)")
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS send_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             lead_id INTEGER NOT NULL,
             scheduled_send_time TEXT NOT NULL,
             queue_status TEXT NOT NULL DEFAULT 'queued',
@@ -272,9 +352,22 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
-    existing_columns = {
-        row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()
-    }
+    if is_postgres_connection(conn):
+        existing_columns = {
+            row["name"]
+            for row in conn.execute(
+                """
+                SELECT column_name AS name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'leads'
+                """
+            ).fetchall()
+        }
+    else:
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()
+        }
     column_defs = {
         "email_source": "TEXT DEFAULT ''",
         "email_status": "TEXT DEFAULT ''",
@@ -311,9 +404,12 @@ def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
         if column not in existing_columns:
             try:
                 conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" not in str(exc).lower():
+            except Exception as exc:
+                message = str(exc).lower()
+                if "duplicate column" not in message and "already exists" not in message:
                     raise
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
 
 
 def _find_existing_lead(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite3.Row]:
@@ -893,24 +989,28 @@ def email_already_sent(conn: sqlite3.Connection, email_lower: str, current_id: i
 
 
 def count_sent_today(conn: sqlite3.Connection) -> int:
+    today_prefix = datetime.now().date().isoformat() + "%"
     row = conn.execute(
         """
         SELECT COUNT(*) AS count
         FROM leads
         WHERE status = 'sent'
-          AND date(sent_at, 'localtime') = date('now', 'localtime')
-        """
+          AND sent_at LIKE ?
+        """,
+        (today_prefix,),
     ).fetchone()
     return int(row["count"])
 
 
 def count_apollo_credits_today(conn: sqlite3.Connection) -> int:
+    today_prefix = datetime.now().date().isoformat() + "%"
     row = conn.execute(
         """
         SELECT COALESCE(SUM(credits), 0) AS count
         FROM apollo_usage
-        WHERE date(used_at, 'localtime') = date('now', 'localtime')
-        """
+        WHERE used_at LIKE ?
+        """,
+        (today_prefix,),
     ).fetchone()
     return int(row["count"])
 
@@ -1041,22 +1141,33 @@ def company_contact_count_this_week(conn: sqlite3.Connection, lead: Lead) -> int
     lead.refresh_normalized_fields()
     if not lead.normalized_domain and not lead.normalized_company_name:
         return 0
+    cutoff = (datetime.utcnow() - timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
     row = conn.execute(
         """
         SELECT COUNT(*) AS count
         FROM leads
         WHERE (normalized_domain = ? OR normalized_company_name = ?)
           AND status IN ('pending', 'send_ready', 'queued', 'sent')
-          AND date(COALESCE(NULLIF(last_contacted_date, ''), sent_at, created_at), 'localtime')
-              >= date('now', '-7 days', 'localtime')
+          AND COALESCE(NULLIF(last_contacted_date, ''), sent_at, created_at) >= ?
         """,
-        (lead.normalized_domain, lead.normalized_company_name),
+        (lead.normalized_domain, lead.normalized_company_name, cutoff),
     ).fetchone()
     return int(row["count"])
 
 
 def start_automation_run(conn: sqlite3.Connection, run_type: str, details: Optional[dict] = None) -> int:
     now = utc_now_iso()
+    if is_postgres_connection(conn):
+        row = conn.execute(
+            """
+            INSERT INTO automation_runs (run_type, started_at, status, details_json)
+            VALUES (?, ?, 'running', ?)
+            RETURNING id
+            """,
+            (run_type, now, json.dumps(details or {}, sort_keys=True)),
+        ).fetchone()
+        conn.commit()
+        return int(row["id"])
     conn.execute(
         """
         INSERT INTO automation_runs (run_type, started_at, status, details_json)

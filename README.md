@@ -44,6 +44,7 @@ emails/
   workflow.py
   run_discovery.py
   run_sender.py
+  migrate_sqlite_to_cloud.py
   dashboard.py
   docs/
     credit_saving_workflow.md
@@ -377,6 +378,37 @@ Important: the current dashboard reads from the local SQLite database at `DATABA
 - Periodically sync a sanitized SQLite/CSV snapshot to the deployment.
 
 The safest current setup is local Streamlit plus private tunnel because it keeps Gmail tokens, Apollo keys, and lead data on your machine.
+
+## Shared Cloud Database
+
+To let the Mac automation and deployed dashboard read the same data in near real time, use a free Postgres-compatible cloud database such as Neon or Supabase.
+
+Set this in `.env` on your Mac and in your Streamlit deployment secrets:
+
+```bash
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require
+```
+
+When `DATABASE_URL` is blank, the workflow falls back to local SQLite at `DATABASE_PATH`. When `DATABASE_URL` is set, discovery, sender, dashboard, queue review, and automation run logs all use the cloud Postgres database.
+
+One-time migration from the current local SQLite database:
+
+```bash
+python migrate_sqlite_to_cloud.py
+```
+
+Recommended setup:
+
+1. Create a free Neon or Supabase Postgres database.
+2. Copy the pooled/session connection string from the provider dashboard.
+3. Add it to local `.env` as `DATABASE_URL`.
+4. Run `pip install -r requirements.txt`.
+5. Run `python migrate_sqlite_to_cloud.py`.
+6. Run `python main.py status` to confirm the Mac is reading the cloud DB.
+7. In Streamlit Community Cloud, add `DATABASE_URL` and the other non-file settings as secrets.
+8. Deploy `dashboard.py`.
+
+Do not upload Gmail OAuth files, `.env`, the local SQLite file, logs, or resume PDFs to the dashboard host.
 
 ## Sending Controls
 
