@@ -753,6 +753,19 @@ def overview() -> None:
         """,
         (date.today().isoformat(),),
     ).iloc[0]["credits"]
+    total_workflow_credits = read_sql(
+        """
+        SELECT COALESCE(SUM(credits), 0) AS credits
+        FROM apollo_usage
+        """
+    ).iloc[0]["credits"]
+    apollo_total = settings.apollo_total_credits
+    apollo_total_label = f"{apollo_total:,}" if apollo_total > 0 else "Not set"
+    apollo_remaining_label = (
+        f"{max(apollo_total - int(total_workflow_credits), 0):,}"
+        if apollo_total > 0
+        else "Set total"
+    )
     sent_today = int(today_runs["sent_count"])
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
     send_ready = int(leads["status"].isin(["send_ready", "queued"]).sum()) if not leads.empty else 0
@@ -763,7 +776,7 @@ def overview() -> None:
     else:
         st.error("DRY_RUN is disabled. Live sender can send emails if run with live confirmation.")
 
-    cols = st.columns(6)
+    cols = st.columns(8)
     with cols[0]:
         metric_card("Discovered Today", int(today_runs["raw_candidates"]))
     with cols[1]:
@@ -775,7 +788,19 @@ def overview() -> None:
     with cols[4]:
         metric_card("Failed Sends", failed)
     with cols[5]:
-        metric_card("Apollo Credits", f"{int(credits)}/{settings.apollo_daily_credit_limit}")
+        metric_card("Apollo Used Today", f"{int(credits)}/{settings.apollo_daily_credit_limit}")
+    with cols[6]:
+        metric_card(
+            "Apollo Total Credits",
+            apollo_total_label,
+            "Set APOLLO_TOTAL_CREDITS in Streamlit secrets or .env.",
+        )
+    with cols[7]:
+        metric_card(
+            "Apollo Remaining Est.",
+            apollo_remaining_label,
+            "Estimated as APOLLO_TOTAL_CREDITS minus credits used by this workflow.",
+        )
 
     st.caption(f"Remaining daily send capacity: {remaining_capacity}")
 

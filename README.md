@@ -408,6 +408,14 @@ Recommended setup:
 7. In Streamlit Community Cloud, add `DATABASE_URL` and the other non-file settings as secrets.
 8. Deploy `dashboard.py`.
 
+Optional dashboard-only setting:
+
+```bash
+APOLLO_TOTAL_CREDITS=100
+```
+
+Apollo's API usage endpoint exposes API rate limits, but not the full plan credit balance. Set `APOLLO_TOTAL_CREDITS` manually in `.env` or Streamlit secrets to populate the Overview card and estimated remaining credits.
+
 Do not upload Gmail OAuth files, `.env`, the local SQLite file, logs, or resume PDFs to the dashboard host.
 
 ## Sending Controls
