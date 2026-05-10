@@ -48,11 +48,12 @@ def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
 def metric_card(label: str, value, help_text: str = "") -> None:
     display_value = f"{value:,}" if isinstance(value, int) else str(value)
     title = f' title="{html.escape(help_text)}"' if help_text else ""
+    value_class = " metric-card-value-long" if len(display_value) > 7 else ""
     st.markdown(
         f"""
         <div class="metric-card"{title}>
             <div class="metric-card-label">{html.escape(label)}</div>
-            <div class="metric-card-value">{html.escape(display_value)}</div>
+            <div class="metric-card-value{value_class}">{html.escape(display_value)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -369,7 +370,9 @@ def setup_page() -> None:
             flex-direction: column;
             justify-content: space-between;
             gap: 10px;
-            overflow: visible;
+            overflow: hidden;
+            box-sizing: border-box;
+            min-width: 0;
         }
         .metric-card-label {
             color: #334155 !important;
@@ -381,9 +384,18 @@ def setup_page() -> None:
         }
         .metric-card-value {
             color: #0f172a !important;
-            font-size: 2rem;
+            font-size: clamp(1.35rem, 1.65vw, 2rem);
             font-weight: 850;
-            line-height: 1;
+            line-height: 1.05;
+            max-width: 100%;
+            min-width: 0;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        .metric-card-value-long {
+            font-size: clamp(1.1rem, 1.28vw, 1.5rem);
+            line-height: 1.1;
         }
         @media (max-width: 1200px) {
             .metric-card {
@@ -392,6 +404,9 @@ def setup_page() -> None:
             }
             .metric-card-value {
                 font-size: 1.65rem;
+            }
+            .metric-card-value-long {
+                font-size: 1.2rem;
             }
         }
         div[data-testid="stMetric"] label,
