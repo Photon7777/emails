@@ -72,6 +72,8 @@ class Settings:
     apollo_reveal_personal_emails: bool
     apollo_daily_credit_limit: int
     apollo_total_credits: int
+    apollo_account_credits_used: int
+    apollo_credit_renewal: str
     min_score_to_enrich: int
     min_score_to_send: int
     max_contacts_per_company_per_week: int
@@ -145,7 +147,9 @@ def load_settings() -> Settings:
             "DAILY_ENRICH_LIMIT",
             _get_int("APOLLO_DAILY_CREDIT_LIMIT", 25),
         ),
-        apollo_total_credits=_get_int("APOLLO_TOTAL_CREDITS", 0),
+        apollo_total_credits=_get_int("APOLLO_TOTAL_CREDITS", 2630),
+        apollo_account_credits_used=_get_int("APOLLO_ACCOUNT_CREDITS_USED", 535),
+        apollo_credit_renewal=_get_str("APOLLO_CREDIT_RENEWAL", "Jun 4, 2026, 2:41 AM"),
         min_score_to_enrich=_get_int("MIN_SCORE_TO_ENRICH", 55),
         min_score_to_send=_get_int("MIN_SCORE_TO_SEND", _get_int("LEAD_SCORE_THRESHOLD", 70)),
         max_contacts_per_company_per_week=_get_int("MAX_CONTACTS_PER_COMPANY_PER_WEEK", 2),

@@ -753,16 +753,15 @@ def overview() -> None:
         """,
         (date.today().isoformat(),),
     ).iloc[0]["credits"]
-    total_workflow_credits = read_sql(
-        """
-        SELECT COALESCE(SUM(credits), 0) AS credits
-        FROM apollo_usage
-        """
-    ).iloc[0]["credits"]
     apollo_total = settings.apollo_total_credits
-    apollo_total_label = f"{apollo_total:,}" if apollo_total > 0 else "Not set"
+    apollo_account_used = settings.apollo_account_credits_used
+    apollo_usage_label = (
+        f"{apollo_account_used:,}/{apollo_total:,}"
+        if apollo_total > 0
+        else f"{apollo_account_used:,}/Not set"
+    )
     apollo_remaining_label = (
-        f"{max(apollo_total - int(total_workflow_credits), 0):,}"
+        f"{max(apollo_total - apollo_account_used, 0):,}"
         if apollo_total > 0
         else "Set total"
     )
@@ -791,15 +790,15 @@ def overview() -> None:
         metric_card("Apollo Used Today", f"{int(credits)}/{settings.apollo_daily_credit_limit}")
     with cols[6]:
         metric_card(
-            "Apollo Total Credits",
-            apollo_total_label,
-            "Set APOLLO_TOTAL_CREDITS in Streamlit secrets or .env.",
+            "Apollo Monthly Usage",
+            apollo_usage_label,
+            f"From Apollo screenshot. Renewal: {settings.apollo_credit_renewal}.",
         )
     with cols[7]:
         metric_card(
-            "Apollo Remaining Est.",
+            "Apollo Remaining",
             apollo_remaining_label,
-            "Estimated as APOLLO_TOTAL_CREDITS minus credits used by this workflow.",
+            "Calculated as APOLLO_TOTAL_CREDITS minus APOLLO_ACCOUNT_CREDITS_USED.",
         )
 
     st.caption(f"Remaining daily send capacity: {remaining_capacity}")

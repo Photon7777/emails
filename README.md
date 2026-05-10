@@ -411,10 +411,12 @@ Recommended setup:
 Optional dashboard-only setting:
 
 ```bash
-APOLLO_TOTAL_CREDITS=100
+APOLLO_TOTAL_CREDITS=2630
+APOLLO_ACCOUNT_CREDITS_USED=535
+APOLLO_CREDIT_RENEWAL=Jun 4, 2026, 2:41 AM
 ```
 
-Apollo's API usage endpoint exposes API rate limits, but not the full plan credit balance. Set `APOLLO_TOTAL_CREDITS` manually in `.env` or Streamlit secrets to populate the Overview card and estimated remaining credits.
+Apollo's API usage endpoint exposes API rate limits, but not the full plan credit balance. Set these manually in `.env` or Streamlit secrets from the Apollo credits page to populate the Overview usage and remaining-credit cards.
 
 Do not upload Gmail OAuth files, `.env`, the local SQLite file, logs, or resume PDFs to the dashboard host.
 
