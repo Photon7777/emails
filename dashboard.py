@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import html
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -45,7 +46,17 @@ def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
 
 
 def metric_card(label: str, value, help_text: str = "") -> None:
-    st.metric(label, value, help=help_text)
+    display_value = f"{value:,}" if isinstance(value, int) else str(value)
+    title = f' title="{html.escape(help_text)}"' if help_text else ""
+    st.markdown(
+        f"""
+        <div class="metric-card"{title}>
+            <div class="metric-card-label">{html.escape(label)}</div>
+            <div class="metric-card-value">{html.escape(display_value)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def load_leads() -> pd.DataFrame:
@@ -344,12 +355,44 @@ def setup_page() -> None:
         """
         <style>
         .main .block-container {padding-top: 1.4rem;}
+        .metric-card,
         div[data-testid="stMetric"] {
             background: #f8fafc;
             border: 1px solid #d8dee9;
             border-radius: 8px;
             padding: 14px 16px;
             box-shadow: 0 1px 2px rgba(15, 23, 42, 0.10);
+        }
+        .metric-card {
+            min-height: 112px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 10px;
+            overflow: visible;
+        }
+        .metric-card-label {
+            color: #334155 !important;
+            font-size: 0.9rem;
+            font-weight: 750;
+            line-height: 1.22;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        .metric-card-value {
+            color: #0f172a !important;
+            font-size: 2rem;
+            font-weight: 850;
+            line-height: 1;
+        }
+        @media (max-width: 1200px) {
+            .metric-card {
+                min-height: 104px;
+                padding: 12px 14px;
+            }
+            .metric-card-value {
+                font-size: 1.65rem;
+            }
         }
         div[data-testid="stMetric"] label,
         div[data-testid="stMetric"] [data-testid="stMetricLabel"],
