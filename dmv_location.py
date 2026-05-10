@@ -52,6 +52,15 @@ REMOTE_TERMS = {
     "work from home",
 }
 
+DMV_SEARCH_TIERS = {
+    "tier_1_strict_dmv_remote",
+    "tier_2_dmv_broader_roles",
+}
+
+REMOTE_SEARCH_TIERS = {
+    "tier_3_remote_us_internships",
+}
+
 
 @dataclass(frozen=True)
 class LocationDecision:
@@ -97,6 +106,7 @@ def evaluate_dmv_location(lead: Lead) -> LocationDecision:
     city = normalize_location_text(lead.city)
     state = normalize_location_text(lead.state)
     country = normalize_location_text(lead.country)
+    source_tier = " ".join(value for value in (lead.search_tier, lead.source_tier) if value).lower()
     internship_type = classify_internship_type(lead.role_title, lead.raw_json)
 
     if any(term in text for term in REMOTE_TERMS):
@@ -127,6 +137,12 @@ def evaluate_dmv_location(lead: Lead) -> LocationDecision:
             continue
         if phrase in text:
             return LocationDecision(True, False, f"state:{label}", internship_type)
+
+    if not city and not state:
+        if any(tier in source_tier for tier in DMV_SEARCH_TIERS):
+            return LocationDecision(True, False, f"apollo_dmv_search_tier:{lead.search_tier or lead.source_tier}", internship_type)
+        if any(tier in source_tier for tier in REMOTE_SEARCH_TIERS):
+            return LocationDecision(True, True, f"apollo_remote_search_tier:{lead.search_tier or lead.source_tier}", internship_type or "remote")
 
     if not city and not state and not any(term in text for term in REMOTE_TERMS):
         return LocationDecision(False, False, "missing_location", internship_type)

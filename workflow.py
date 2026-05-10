@@ -70,6 +70,7 @@ class ColdEmailWorkflow:
             "skipped_company_limit": 0,
             "rejected_low_score": 0,
             "rejected_below_send_score": 0,
+            "queued_existing": 0,
         }
         with db.connect(settings.database_path, settings.database_url) as conn:
             db.init_db(conn)
@@ -94,12 +95,13 @@ class ColdEmailWorkflow:
 
             try:
                 client = ApolloClient(settings)
+                desired_send_inventory = max(
+                    settings.pending_inventory_target,
+                    settings.daily_send_target_min,
+                    settings.daily_send_limit,
+                )
                 raw_people = client.search_people(
-                    target_count=max(
-                        settings.pending_inventory_target,
-                        settings.daily_send_target_min,
-                        settings.daily_send_limit,
-                    )
+                    target_count=min(max(desired_send_inventory * 4, settings.apollo_fetch_per_page), 200)
                 )
                 counts["searched"] = len(raw_people)
                 db.record_search_logs(conn, run_id, client.search_debug)
@@ -176,14 +178,17 @@ class ColdEmailWorkflow:
 
                     existing_row = db.find_existing_lead(conn, lead)
                     if existing_row:
-                        counts["skipped_duplicate"] += 1
-                        lead.notes = f"Duplicate local person row {existing_row['id']}; not enriched to save Apollo credits"
-                        lead.status = "skipped"
-                        lead.rejection_reason = "Duplicate local person"
-                        lead.error_message = lead.rejection_reason
-                        action = db.upsert_lead(conn, lead)
-                        counts[action] += 1
-                        continue
+                        if self._should_retry_existing_lead(existing_row, lead):
+                            lead.notes = f"Retrying previously location-skipped row {existing_row['id']} after DMV tier match"
+                        else:
+                            counts["skipped_duplicate"] += 1
+                            lead.notes = f"Duplicate local person row {existing_row['id']}; not enriched to save Apollo credits"
+                            lead.status = "skipped"
+                            lead.rejection_reason = "Duplicate local person"
+                            lead.error_message = lead.rejection_reason
+                            action = db.upsert_lead(conn, lead)
+                            counts[action] += 1
+                            continue
 
                     total_score, score_parts = score_lead(lead, settings)
                     lead.lead_score = total_score
@@ -293,6 +298,17 @@ class ColdEmailWorkflow:
                         if queued_lead_id:
                             counts["queued"] += 1
 
+                if counts["queued"] < settings.daily_send_target_min:
+                    queued_existing = self._top_up_queue_from_existing(
+                        conn,
+                        scheduled_send_time,
+                        settings.daily_send_target_min - counts["queued"],
+                        block_items,
+                    )
+                    counts["queued_existing"] += queued_existing
+                    counts["queued"] += queued_existing
+                    counts["send_ready"] += queued_existing
+
                 db.export_to_csv(conn, settings.leads_csv_path)
                 db.complete_automation_run(
                     conn,
@@ -302,6 +318,7 @@ class ColdEmailWorkflow:
                     details={"apollo_search_debug": client.search_debug},
                 )
             except Exception as exc:
+                conn.rollback()
                 db.complete_automation_run(conn, run_id, "failed", counts, error_summary=str(exc))
                 raise
 
@@ -729,6 +746,103 @@ class ColdEmailWorkflow:
     def _lead_is_allowed_by_location(self, lead: Lead) -> bool:
         apply_dmv_location(lead)
         return bool(lead.is_dmv)
+
+    def _top_up_queue_from_existing(
+        self,
+        conn,
+        scheduled_send_time: str,
+        needed: int,
+        block_items: set[str],
+    ) -> int:
+        if needed <= 0:
+            return 0
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM leads
+            WHERE status IN ('pending', 'send_ready', 'enriched', 'skipped', 'raw')
+              AND COALESCE(email_sent, 0) = 0
+              AND COALESCE(manually_skipped, 0) = 0
+              AND COALESCE(queue_status, 'not_queued') != 'queued'
+              AND email_lower IS NOT NULL
+              AND email_lower != ''
+              AND COALESCE(lead_score, 0) >= ?
+            ORDER BY lead_score DESC, updated_at DESC, id ASC
+            LIMIT ?
+            """,
+            (self.settings.min_score_to_send, max(needed * 20, 50)),
+        ).fetchall()
+
+        queued = 0
+        for row in rows:
+            if queued >= needed:
+                break
+            lead = Lead.from_row(row)
+            lead.refresh_normalized_fields()
+            apply_dmv_location(lead)
+            if not self._lead_is_allowed_by_location(lead):
+                continue
+            if db.lead_matches_blocklist(lead, block_items):
+                continue
+            if db.email_already_sent(conn, lead.email_lower, int(row["id"])):
+                continue
+            if db.company_contact_count_this_week(conn, lead) >= self.settings.max_contacts_per_company_per_week:
+                continue
+            if not self._email_domain_matches_company(lead):
+                continue
+
+            score, parts = score_lead(lead, self.settings)
+            if score < self.settings.min_score_to_send:
+                continue
+            lead.lead_score = score
+            lead.score_breakdown = breakdown_json(parts)
+            lead.status = "send_ready"
+            lead.error_message = ""
+            lead.rejection_reason = ""
+            db.update_lead_quality(
+                conn,
+                int(row["id"]),
+                lead.lead_score,
+                lead.score_breakdown,
+                status="send_ready",
+                notes="Queued from existing vetted inventory without Apollo enrichment",
+            )
+            subject, body = render_email(lead, self.settings)
+            if db.queue_lead_for_send(conn, lead, scheduled_send_time, subject, body):
+                queued += 1
+
+        if queued:
+            logger.info("Queued %s existing leads without Apollo enrichment", queued)
+        return queued
+
+    def _should_retry_existing_lead(self, existing_row, lead: Lead) -> bool:
+        if int(existing_row["email_sent"] or 0) or int(existing_row["bounced"] or 0):
+            return False
+        if int(existing_row["manually_skipped"] or 0):
+            return False
+
+        status = (existing_row["status"] or "").lower()
+        rejection_reason = (existing_row["rejection_reason"] or "").lower()
+        location_match = (existing_row["location_match"] or "").lower()
+        source_tier = (lead.search_tier or lead.source_tier or existing_row["search_tier"] or existing_row["source_tier"] or "").lower()
+
+        was_location_skipped = (
+            status in {"skipped", "raw"}
+            and (
+                "outside dmv" in rejection_reason
+                or "not remote" in rejection_reason
+                or "duplicate local person" in rejection_reason
+                or "company weekly contact limit reached" in rejection_reason
+                or location_match == "missing_location"
+            )
+        )
+        is_trusted_location_tier = source_tier in {
+            "tier_1_strict_dmv_remote",
+            "tier_2_dmv_broader_roles",
+            "tier_3_remote_us_internships",
+        }
+        return was_location_skipped and is_trusted_location_tier and self._lead_is_allowed_by_location(lead)
 
     def _email_domain_matches_company(self, lead: Lead) -> bool:
         if not lead.email or not lead.normalized_domain:

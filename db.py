@@ -431,9 +431,17 @@ def _find_existing_lead(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite
     if lead.normalized_linkedin_url:
         checks.append("normalized_linkedin_url = ?")
         values.append(lead.normalized_linkedin_url)
-    if lead.full_name and (lead.normalized_domain or lead.normalized_company_name):
-        checks.append("(LOWER(full_name) = ? AND (normalized_domain = ? OR normalized_company_name = ?))")
-        values.extend([lead.full_name.lower(), lead.normalized_domain, lead.normalized_company_name])
+    company_checks = []
+    company_values = []
+    if lead.normalized_domain:
+        company_checks.append("normalized_domain = ?")
+        company_values.append(lead.normalized_domain)
+    if lead.normalized_company_name:
+        company_checks.append("normalized_company_name = ?")
+        company_values.append(lead.normalized_company_name)
+    if lead.full_name and company_checks:
+        checks.append(f"(LOWER(full_name) = ? AND ({' OR '.join(company_checks)}))")
+        values.extend([lead.full_name.lower(), *company_values])
 
     if not checks:
         return None
@@ -531,20 +539,20 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 source_tier = COALESCE(NULLIF(?, ''), source_tier),
                 search_tier = COALESCE(NULLIF(?, ''), search_tier),
                 location_match = COALESCE(NULLIF(?, ''), location_match),
-                is_dmv = CASE WHEN ? THEN 1 ELSE is_dmv END,
-                remote_dmv_eligible = CASE WHEN ? THEN 1 ELSE remote_dmv_eligible END,
+                is_dmv = CASE WHEN ? != 0 THEN 1 ELSE is_dmv END,
+                remote_dmv_eligible = CASE WHEN ? != 0 THEN 1 ELSE remote_dmv_eligible END,
                 internship_type = COALESCE(NULLIF(?, ''), internship_type),
                 normalized_company_name = COALESCE(NULLIF(?, ''), normalized_company_name),
                 normalized_domain = COALESCE(NULLIF(?, ''), normalized_domain),
                 normalized_linkedin_url = COALESCE(NULLIF(?, ''), normalized_linkedin_url),
                 lead_score = CASE WHEN ? > lead_score THEN ? ELSE lead_score END,
                 score_breakdown = COALESCE(NULLIF(?, '{}'), score_breakdown),
-                apollo_used = CASE WHEN ? THEN 1 ELSE apollo_used END,
+                apollo_used = CASE WHEN ? != 0 THEN 1 ELSE apollo_used END,
                 apollo_credits_used = apollo_credits_used + ?,
                 last_contacted_date = COALESCE(NULLIF(?, ''), last_contacted_date),
-                email_sent = CASE WHEN ? THEN 1 ELSE email_sent END,
-                reply_received = CASE WHEN ? THEN 1 ELSE reply_received END,
-                bounced = CASE WHEN ? THEN 1 ELSE bounced END,
+                email_sent = CASE WHEN ? != 0 THEN 1 ELSE email_sent END,
+                reply_received = CASE WHEN ? != 0 THEN 1 ELSE reply_received END,
+                bounced = CASE WHEN ? != 0 THEN 1 ELSE bounced END,
                 notes = COALESCE(NULLIF(?, ''), notes),
                 status = ?,
                 error_message = ?,
@@ -552,8 +560,8 @@ def upsert_lead(conn: sqlite3.Connection, lead: Lead) -> str:
                 discovery_run_id = CASE WHEN ? > 0 THEN ? ELSE discovery_run_id END,
                 queued_send_time = COALESCE(NULLIF(?, ''), queued_send_time),
                 queue_status = COALESCE(NULLIF(?, ''), queue_status),
-                approved_for_send = CASE WHEN ? THEN 1 ELSE approved_for_send END,
-                manually_skipped = CASE WHEN ? THEN 1 ELSE manually_skipped END,
+                approved_for_send = CASE WHEN ? != 0 THEN 1 ELSE approved_for_send END,
+                manually_skipped = CASE WHEN ? != 0 THEN 1 ELSE manually_skipped END,
                 manual_review_note = COALESCE(NULLIF(?, ''), manual_review_note),
                 updated_at = ?,
                 raw_json = COALESCE(NULLIF(?, '{}'), raw_json)
@@ -762,9 +770,17 @@ def blocking_match(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite3.Row
     if lead.linkedin_url:
         checks.append("LOWER(linkedin_url) = ?")
         values.append(lead.linkedin_url.lower())
-    if lead.full_name and (lead.normalized_domain or lead.normalized_company_name):
-        checks.append("(LOWER(full_name) = ? AND (normalized_domain = ? OR normalized_company_name = ?))")
-        values.extend([lead.full_name.lower(), lead.normalized_domain, lead.normalized_company_name])
+    company_checks = []
+    company_values = []
+    if lead.normalized_domain:
+        company_checks.append("normalized_domain = ?")
+        company_values.append(lead.normalized_domain)
+    if lead.normalized_company_name:
+        company_checks.append("normalized_company_name = ?")
+        company_values.append(lead.normalized_company_name)
+    if lead.full_name and company_checks:
+        checks.append(f"(LOWER(full_name) = ? AND ({' OR '.join(company_checks)}))")
+        values.extend([lead.full_name.lower(), *company_values])
 
     if not checks:
         return None
@@ -989,7 +1005,7 @@ def email_already_sent(conn: sqlite3.Connection, email_lower: str, current_id: i
 
 
 def count_sent_today(conn: sqlite3.Connection) -> int:
-    today_prefix = datetime.now().date().isoformat() + "%"
+    today_prefix = datetime.utcnow().date().isoformat() + "%"
     row = conn.execute(
         """
         SELECT COUNT(*) AS count
@@ -1003,7 +1019,7 @@ def count_sent_today(conn: sqlite3.Connection) -> int:
 
 
 def count_apollo_credits_today(conn: sqlite3.Connection) -> int:
-    today_prefix = datetime.now().date().isoformat() + "%"
+    today_prefix = datetime.utcnow().date().isoformat() + "%"
     row = conn.execute(
         """
         SELECT COALESCE(SUM(credits), 0) AS count
@@ -1096,6 +1112,9 @@ def read_csv_identity_keys(path: Path) -> set[str]:
     with path.open(newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
         for row in reader:
+            status = (row.get("status") or row.get("Status") or "").strip().lower()
+            if status in {"raw", "rejected", "skipped"}:
+                continue
             email = (row.get("email") or row.get("Email") or "").strip().lower()
             domain = normalize_domain(
                 row.get("domain")
@@ -1139,18 +1158,26 @@ def lead_matches_identity_keys(lead: Lead, keys: set[str]) -> bool:
 
 def company_contact_count_this_week(conn: sqlite3.Connection, lead: Lead) -> int:
     lead.refresh_normalized_fields()
-    if not lead.normalized_domain and not lead.normalized_company_name:
+    company_checks = []
+    values = []
+    if lead.normalized_domain:
+        company_checks.append("normalized_domain = ?")
+        values.append(lead.normalized_domain)
+    if lead.normalized_company_name:
+        company_checks.append("normalized_company_name = ?")
+        values.append(lead.normalized_company_name)
+    if not company_checks:
         return 0
     cutoff = (datetime.utcnow() - timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS count
         FROM leads
-        WHERE (normalized_domain = ? OR normalized_company_name = ?)
+        WHERE ({' OR '.join(company_checks)})
           AND status IN ('pending', 'send_ready', 'queued', 'sent')
           AND COALESCE(NULLIF(last_contacted_date, ''), sent_at, created_at) >= ?
         """,
-        (lead.normalized_domain, lead.normalized_company_name, cutoff),
+        (*values, cutoff),
     ).fetchone()
     return int(row["count"])
 

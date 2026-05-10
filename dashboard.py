@@ -712,7 +712,7 @@ def overview() -> None:
     ).iloc[0]["credits"]
     sent_today = int(today_runs["sent_count"])
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
-    send_ready = int((leads["status"] == "send_ready").sum()) if not leads.empty else 0
+    send_ready = int(leads["status"].isin(["send_ready", "queued"]).sum()) if not leads.empty else 0
     failed = int((leads["status"] == "failed").sum()) if not leads.empty else 0
 
     if settings.dry_run:
