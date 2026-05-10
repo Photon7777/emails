@@ -345,11 +345,28 @@ def setup_page() -> None:
         <style>
         .main .block-container {padding-top: 1.4rem;}
         div[data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
+            background: #f8fafc;
+            border: 1px solid #d8dee9;
             border-radius: 8px;
             padding: 14px 16px;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.10);
+        }
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+            color: #334155 !important;
+            font-weight: 700;
+        }
+        div[data-testid="stMetric"] [data-testid="stMetricValue"],
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] div,
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] p {
+            color: #0f172a !important;
+            font-weight: 800;
+        }
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"],
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"] div,
+        div[data-testid="stMetric"] [data-testid="stMetricDelta"] p {
+            color: #475569 !important;
         }
         .status-pill {
             display: inline-block;
