@@ -74,6 +74,11 @@ class Settings:
     apollo_total_credits: int
     apollo_account_credits_used: int
     apollo_credit_renewal: str
+    base_monthly_apollo_credits: int
+    apollo_credit_reset_day: int
+    estimated_credit_cost_per_enrichment: int
+    enable_credit_guardrails: bool
+    min_apollo_credits_reserve: int
     min_score_to_enrich: int
     min_score_to_send: int
     max_contacts_per_company_per_week: int
@@ -150,6 +155,14 @@ def load_settings() -> Settings:
         apollo_total_credits=_get_int("APOLLO_TOTAL_CREDITS", 2630),
         apollo_account_credits_used=_get_int("APOLLO_ACCOUNT_CREDITS_USED", 535),
         apollo_credit_renewal=_get_str("APOLLO_CREDIT_RENEWAL", "Jun 4, 2026, 2:41 AM"),
+        base_monthly_apollo_credits=_get_int(
+            "BASE_MONTHLY_APOLLO_CREDITS",
+            _get_int("APOLLO_TOTAL_CREDITS", 2630),
+        ),
+        apollo_credit_reset_day=_get_int("APOLLO_CREDIT_RESET_DAY", 1),
+        estimated_credit_cost_per_enrichment=_get_int("ESTIMATED_CREDIT_COST_PER_ENRICHMENT", 1),
+        enable_credit_guardrails=_get_bool("ENABLE_CREDIT_GUARDRAILS", True),
+        min_apollo_credits_reserve=_get_int("MIN_APOLLO_CREDITS_RESERVE", 100),
         min_score_to_enrich=_get_int("MIN_SCORE_TO_ENRICH", 55),
         min_score_to_send=_get_int("MIN_SCORE_TO_SEND", _get_int("LEAD_SCORE_THRESHOLD", 70)),
         max_contacts_per_company_per_week=_get_int("MAX_CONTACTS_PER_COMPANY_PER_WEEK", 2),

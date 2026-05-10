@@ -274,6 +274,24 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_usage_used_at ON apollo_usage(used_at)")
     conn.execute(
         f"""
+        CREATE TABLE IF NOT EXISTS apollo_credit_events (
+            id {id_column},
+            event_type TEXT NOT NULL,
+            lead_id INTEGER,
+            automation_run_id INTEGER,
+            credit_cost INTEGER NOT NULL DEFAULT 0,
+            credit_delta INTEGER NOT NULL DEFAULT 0,
+            description TEXT DEFAULT '',
+            source TEXT DEFAULT 'workflow',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_credit_events_created_at ON apollo_credit_events(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_credit_events_event_type ON apollo_credit_events(event_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_apollo_credit_events_source ON apollo_credit_events(source)")
+    conn.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS email_events (
             id {id_column},
             lead_id INTEGER,
@@ -348,7 +366,70 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_status ON send_queue(queue_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_scheduled ON send_queue(scheduled_send_time)")
+    _migrate_apollo_usage_to_credit_events(conn)
     conn.commit()
+
+
+def _credit_event_type_for_operation(operation: str) -> str:
+    operation_lower = (operation or "").lower()
+    if "enrich" in operation_lower or "match" in operation_lower:
+        return "enrich"
+    if "email" in operation_lower:
+        return "email_lookup"
+    return "search"
+
+
+def _apollo_usage_credit_description(usage_id: int, operation: str, notes: str = "") -> str:
+    detail = notes or operation or "Apollo credit usage"
+    return f"apollo_usage:{usage_id} {detail}"[:1000]
+
+
+def _migrate_apollo_usage_to_credit_events(conn: sqlite3.Connection) -> None:
+    """Copy legacy apollo_usage rows into the newer credit event ledger once."""
+
+    rows = conn.execute(
+        """
+        SELECT id, used_at, operation, credits, lead_id, company_name, contact_name, notes
+        FROM apollo_usage
+        WHERE COALESCE(credits, 0) > 0
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    for row in rows:
+        usage_id = int(row["id"])
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM apollo_credit_events
+            WHERE description LIKE ?
+            LIMIT 1
+            """,
+            (f"apollo_usage:{usage_id} %",),
+        ).fetchone()
+        if existing:
+            continue
+        operation = row["operation"] or ""
+        notes = row["notes"] or ""
+        if not notes:
+            company = row["company_name"] or ""
+            contact = row["contact_name"] or ""
+            notes = " ".join(part for part in [operation, contact, company] if part)
+        conn.execute(
+            """
+            INSERT INTO apollo_credit_events (
+                event_type, lead_id, automation_run_id, credit_cost, credit_delta,
+                description, source, created_at
+            )
+            VALUES (?, ?, NULL, ?, 0, ?, 'system', ?)
+            """,
+            (
+                _credit_event_type_for_operation(operation),
+                row["lead_id"],
+                int(row["credits"] or 0),
+                _apollo_usage_credit_description(usage_id, operation, notes),
+                row["used_at"],
+            ),
+        )
 
 
 def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
@@ -1022,9 +1103,9 @@ def count_apollo_credits_today(conn: sqlite3.Connection) -> int:
     today_prefix = datetime.utcnow().date().isoformat() + "%"
     row = conn.execute(
         """
-        SELECT COALESCE(SUM(credits), 0) AS count
-        FROM apollo_usage
-        WHERE used_at LIKE ?
+        SELECT COALESCE(SUM(credit_cost), 0) AS count
+        FROM apollo_credit_events
+        WHERE created_at LIKE ?
         """,
         (today_prefix,),
     ).fetchone()
@@ -1037,24 +1118,57 @@ def record_apollo_usage(
     credits: int,
     lead: Optional[Lead] = None,
     notes: str = "",
+    automation_run_id: Optional[int] = None,
 ) -> None:
     now = utc_now_iso()
-    conn.execute(
-        """
-        INSERT INTO apollo_usage (
-            used_at, operation, credits, lead_id, company_name, contact_name, notes
-        )
-        VALUES (?, ?, ?, NULL, ?, ?, ?)
-        """,
-        (
-            now,
-            operation,
-            credits,
-            lead.company_name if lead else "",
-            lead.full_name if lead else "",
-            notes[:1000],
-        ),
+    params = (
+        now,
+        operation,
+        credits,
+        lead.company_name if lead else "",
+        lead.full_name if lead else "",
+        notes[:1000],
     )
+    if is_postgres_connection(conn):
+        row = conn.execute(
+            """
+            INSERT INTO apollo_usage (
+                used_at, operation, credits, lead_id, company_name, contact_name, notes
+            )
+            VALUES (?, ?, ?, NULL, ?, ?, ?)
+            RETURNING id
+            """,
+            params,
+        ).fetchone()
+        usage_id = int(row["id"])
+    else:
+        conn.execute(
+            """
+            INSERT INTO apollo_usage (
+                used_at, operation, credits, lead_id, company_name, contact_name, notes
+            )
+            VALUES (?, ?, ?, NULL, ?, ?, ?)
+            """,
+            params,
+        )
+        usage_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+    if credits > 0:
+        conn.execute(
+            """
+            INSERT INTO apollo_credit_events (
+                event_type, lead_id, automation_run_id, credit_cost, credit_delta,
+                description, source, created_at
+            )
+            VALUES (?, NULL, ?, ?, 0, ?, 'workflow', ?)
+            """,
+            (
+                _credit_event_type_for_operation(operation),
+                automation_run_id,
+                int(credits),
+                _apollo_usage_credit_description(usage_id, operation, notes),
+                now,
+            ),
+        )
     conn.commit()
 
 
@@ -1220,7 +1334,9 @@ def complete_automation_run(
         sum(
             int(value)
             for key, value in counts.items()
-            if key.startswith("skipped") or key.startswith("rejected")
+            if key.startswith("skipped")
+            or key.startswith("rejected")
+            or key in {"credit_budget_hit", "credit_guardrail_hit"}
         ),
     )
     run_details = {"counts": counts}

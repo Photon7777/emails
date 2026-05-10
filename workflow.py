@@ -16,6 +16,7 @@ from config import (
     validate_resume_attachment,
     validate_sender_settings,
 )
+import credits_service
 import db
 from dmv_location import apply_dmv_location
 from email_template import render_email
@@ -63,6 +64,7 @@ class ColdEmailWorkflow:
             "enriched": 0,
             "apollo_credits_used": 0,
             "credit_budget_hit": 0,
+            "credit_guardrail_hit": 0,
             "skipped_missing_email": 0,
             "skipped_non_dmv": 0,
             "skipped_duplicate": 0,
@@ -92,6 +94,7 @@ class ColdEmailWorkflow:
             block_items = suppression_items | do_not_contact_items | already_contacted_items
             credits_used_today = db.count_apollo_credits_today(conn)
             scheduled_send_time = self._next_morning_send_time()
+            run_warnings = []
 
             try:
                 client = ApolloClient(settings)
@@ -210,7 +213,26 @@ class ColdEmailWorkflow:
                     self._try_free_email_fallbacks(lead)
 
                     if not lead.email and settings.apollo_enrich_missing_emails:
-                        if settings.apollo_daily_credit_limit >= 0 and credits_used_today >= settings.apollo_daily_credit_limit:
+                        guardrail_allowed, guardrail_reason = credits_service.credit_guardrail_decision(
+                            conn,
+                            settings,
+                            total_score,
+                        )
+                        if not self._can_attempt_apollo_enrichment(lead):
+                            lead.status = "raw"
+                            lead.rejection_reason = "Missing Apollo identifiers for safe enrichment"
+                            lead.error_message = lead.rejection_reason
+                            lead.notes = "Held without spending Apollo credits"
+                            counts["skipped_missing_email"] += 1
+                        elif not guardrail_allowed:
+                            lead.status = "pending_credit_limit"
+                            lead.rejection_reason = guardrail_reason
+                            lead.error_message = guardrail_reason
+                            lead.notes = "Held without enrichment to preserve Apollo credits"
+                            counts["credit_guardrail_hit"] += 1
+                            if guardrail_reason not in run_warnings:
+                                run_warnings.append(guardrail_reason)
+                        elif settings.apollo_daily_credit_limit >= 0 and credits_used_today >= settings.apollo_daily_credit_limit:
                             lead.status = "raw"
                             lead.rejection_reason = (
                                 f"Apollo daily enrichment budget reached "
@@ -222,11 +244,6 @@ class ColdEmailWorkflow:
                         else:
                             try:
                                 lead = client.enrich_lead(lead)
-                            except Exception as exc:
-                                logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
-                                lead.error_message = str(exc)
-                                lead.rejection_reason = str(exc)
-                            finally:
                                 credits_used_today += 1
                                 lead.apollo_credits_used += 1
                                 lead.apollo_used = True
@@ -237,8 +254,13 @@ class ColdEmailWorkflow:
                                     operation="people_match_enrichment",
                                     credits=1,
                                     lead=lead,
-                                    notes=f"Budgeted enrichment after tiered search from {lead.source_tier}",
+                                    notes=f"Email enrichment for {lead.full_name or 'unknown'} at {lead.company_name or 'unknown company'} from {lead.source_tier}",
+                                    automation_run_id=run_id,
                                 )
+                            except Exception as exc:
+                                logger.exception("Apollo enrichment failed for %s: %s", lead.full_name, exc)
+                                lead.error_message = str(exc)
+                                lead.rejection_reason = str(exc)
 
                             if lead.email:
                                 lead.email_source = "apollo_enrichment"
@@ -260,10 +282,11 @@ class ColdEmailWorkflow:
                     lead.refresh_normalized_fields()
 
                     if not lead.email:
-                        lead.status = "rejected" if lead.apollo_used else "raw"
-                        lead.rejection_reason = "No reliable email found after allowed enrichment" if lead.apollo_used else "Missing email; enrichment deferred"
-                        lead.error_message = lead.rejection_reason
-                        counts["skipped_missing_email"] += 1
+                        if lead.status != "pending_credit_limit":
+                            lead.status = "rejected" if lead.apollo_used else "raw"
+                            lead.rejection_reason = "No reliable email found after allowed enrichment" if lead.apollo_used else "Missing email; enrichment deferred"
+                            lead.error_message = lead.rejection_reason
+                            counts["skipped_missing_email"] += 1
                     elif not self._email_domain_matches_company(lead):
                         lead.status = "rejected"
                         lead.rejection_reason = "Email domain does not match company domain"
@@ -315,7 +338,10 @@ class ColdEmailWorkflow:
                     run_id,
                     "success",
                     counts,
-                    details={"apollo_search_debug": client.search_debug},
+                    details={
+                        "apollo_search_debug": client.search_debug,
+                        "warnings": run_warnings,
+                    },
                 )
             except Exception as exc:
                 conn.rollback()
@@ -746,6 +772,15 @@ class ColdEmailWorkflow:
     def _lead_is_allowed_by_location(self, lead: Lead) -> bool:
         apply_dmv_location(lead)
         return bool(lead.is_dmv)
+
+    def _can_attempt_apollo_enrichment(self, lead: Lead) -> bool:
+        return bool(
+            lead.apollo_id
+            or lead.full_name
+            or lead.company_domain
+            or lead.company_name
+            or lead.linkedin_url
+        )
 
     def _top_up_queue_from_existing(
         self,

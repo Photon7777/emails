@@ -293,6 +293,25 @@ Discovery runs four Apollo search tiers and stops once enough unique candidates 
 
 Apollo enrichment is never automatic for every search result. The workflow first dedupes locally, checks blocklists and company weekly limits, scores the raw lead, and only enriches missing emails when `score >= MIN_SCORE_TO_ENRICH`.
 
+## Apollo Credit Dashboard
+
+The Streamlit sidebar has a **Credits** page for Apollo accounting:
+
+- Overview cards show base credits, top-ups, total available, used this month, used today, remaining credits, estimated credits saved, and average daily usage.
+- Manual top-ups add `top_up` events to `apollo_credit_events`.
+- Manual corrections add `adjustment` events and can be positive or negative.
+- Usage history shows every `search`, `enrich`, `email_lookup`, `top_up`, and `adjustment` event for the selected month.
+- Charts show daily usage, remaining credits over time, credits by event type, and top-ups over time.
+- Forecast cards estimate monthly usage and whether current usage is sustainable.
+
+Credit guardrails run before Apollo enrichment:
+
+- More than 500 remaining credits: normal enrichment flow.
+- 100 to 500 remaining credits: enrich only leads scoring at least 80.
+- 100 or fewer remaining credits: pause enrichment and mark leads as `pending_credit_limit`.
+
+Only Apollo actions that are expected to consume credits are logged as credit usage. Local scoring, filtering, deduplication, and rejected leads do not count as used credits. Rejected-before-enrichment leads are counted only in the estimated credits saved metric.
+
 ## Manual Test Commands
 
 Run these before scheduling anything:
@@ -408,15 +427,31 @@ Recommended setup:
 7. In Streamlit Community Cloud, add `DATABASE_URL` and the other non-file settings as secrets.
 8. Deploy `dashboard.py`.
 
-Optional dashboard-only setting:
+Apollo credit tracking settings:
 
 ```bash
-APOLLO_TOTAL_CREDITS=2630
-APOLLO_ACCOUNT_CREDITS_USED=535
-APOLLO_CREDIT_RENEWAL=Jun 4, 2026, 2:41 AM
+BASE_MONTHLY_APOLLO_CREDITS=2630
+APOLLO_CREDIT_RESET_DAY=1
+ESTIMATED_CREDIT_COST_PER_ENRICHMENT=1
+ENABLE_CREDIT_GUARDRAILS=true
+MIN_APOLLO_CREDITS_RESERVE=100
 ```
 
-Apollo's API usage endpoint exposes API rate limits, but not the full plan credit balance. Set these manually in `.env` or Streamlit secrets from the Apollo credits page to populate the Overview usage and remaining-credit cards.
+The dashboard does not call Apollo just to check plan balance. It uses the workflow's `apollo_credit_events` ledger plus manual top-ups or adjustments entered on the **Credits** page.
+
+Monthly available credits are calculated as:
+
+```text
+2630 base monthly credits + current-month top-ups + current-month adjustments
+```
+
+Monthly remaining credits are calculated as:
+
+```text
+available credits - workflow Apollo credit events for the selected month
+```
+
+Use the **Credits** page to add a top-up when you buy extra Apollo credits, or an adjustment when Apollo's official dashboard differs from the local ledger. Usage resets each month and unused base credits do not carry forward unless you enter a top-up or adjustment for that month.
 
 Do not upload Gmail OAuth files, `.env`, the local SQLite file, logs, or resume PDFs to the dashboard host.
 
@@ -433,6 +468,9 @@ DELAY_BETWEEN_EMAILS_SECONDS=10
 MAX_RETRIES=3
 APOLLO_DAILY_CREDIT_LIMIT=25
 DAILY_ENRICH_LIMIT=25
+BASE_MONTHLY_APOLLO_CREDITS=2630
+ENABLE_CREDIT_GUARDRAILS=true
+MIN_APOLLO_CREDITS_RESERVE=100
 MIN_SCORE_TO_ENRICH=55
 MIN_SCORE_TO_SEND=70
 MAX_CONTACTS_PER_COMPANY_PER_WEEK=2
@@ -447,6 +485,9 @@ Useful values:
 - `DELAY_BETWEEN_EMAILS_SECONDS=45`: waits between sends.
 - `MAX_RETRIES=3`: retries transient Gmail/API failures.
 - `DAILY_ENRICH_LIMIT=25`: caps daily Apollo enrichment attempts.
+- `BASE_MONTHLY_APOLLO_CREDITS=2630`: default Apollo monthly credit allowance before top-ups.
+- `ENABLE_CREDIT_GUARDRAILS=true`: pauses or narrows enrichment when credits are low.
+- `MIN_APOLLO_CREDITS_RESERVE=100`: stops paid enrichment at the reserve threshold.
 - `MIN_SCORE_TO_ENRICH=55`: prevents Apollo credits being spent on weak leads.
 - `MIN_SCORE_TO_SEND=70`: only makes high-fit leads send-ready.
 - `MAX_CONTACTS_PER_COMPANY_PER_WEEK=2`: avoids over-contacting the same company.

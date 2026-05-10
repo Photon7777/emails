@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import html
+import calendar
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import credits_service
 from config import load_settings
 import db
 from email_template import render_email
@@ -122,6 +124,45 @@ def load_search_logs() -> pd.DataFrame:
         ORDER BY s.created_at DESC, s.id DESC
         LIMIT 500
         """
+    )
+
+
+@st.cache_data(ttl=20)
+def load_credit_summary(month_start_iso: str) -> dict:
+    selected_month = date.fromisoformat(month_start_iso)
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        return credits_service.calculate_credit_summary(conn, settings, selected_month).to_dict()
+
+
+@st.cache_data(ttl=20)
+def load_credit_events(month_start_iso: str) -> pd.DataFrame:
+    selected_month = date.fromisoformat(month_start_iso)
+    period_start, period_end = credits_service.credit_period_bounds(
+        selected_month,
+        settings.apollo_credit_reset_day,
+    )
+    return read_sql(
+        """
+        SELECT
+            e.id,
+            e.created_at,
+            e.event_type,
+            e.lead_id,
+            COALESCE(l.full_name, '') AS lead_name,
+            COALESCE(l.company_name, '') AS company_name,
+            e.automation_run_id,
+            e.credit_cost,
+            e.credit_delta,
+            e.description,
+            e.source
+        FROM apollo_credit_events e
+        LEFT JOIN leads l ON l.id = e.lead_id
+        WHERE e.created_at >= ?
+          AND e.created_at < ?
+        ORDER BY e.created_at DESC, e.id DESC
+        """,
+        (period_start.isoformat(), period_end.isoformat()),
     )
 
 
@@ -322,6 +363,7 @@ def status_badge(status: str) -> str:
         "failed": "#b91c1c",
         "duplicate": "#6b7280",
         "missing_email": "#9333ea",
+        "pending_credit_limit": "#f59e0b",
     }
     color = colors.get(status, "#334155")
     return f"<span class='status-pill' style='color:{color}; background:#f8fafc; border:1px solid #e2e8f0;'>{status}</span>"
@@ -343,6 +385,8 @@ def classify_rejection(row: pd.Series) -> str:
         return "Irrelevant title"
     if "weekly contact limit" in reason:
         return "Company weekly limit reached"
+    if "credit" in reason and ("reserve" in reason or "low" in reason or "limit" in reason):
+        return "Apollo credit guardrail"
     if "apollo" in reason and "failed" in reason:
         return "Apollo enrichment failed"
     if "gmail" in reason or "send" in reason or "validation" in reason:
@@ -760,26 +804,7 @@ def overview() -> None:
         """,
         (date.today().isoformat(),),
     ).iloc[0]
-    credits = read_sql(
-        """
-        SELECT COALESCE(SUM(credits), 0) AS credits
-        FROM apollo_usage
-        WHERE substr(used_at, 1, 10) = ?
-        """,
-        (date.today().isoformat(),),
-    ).iloc[0]["credits"]
-    apollo_total = settings.apollo_total_credits
-    apollo_account_used = settings.apollo_account_credits_used
-    apollo_usage_label = (
-        f"{apollo_account_used:,}/{apollo_total:,}"
-        if apollo_total > 0
-        else f"{apollo_account_used:,}/Not set"
-    )
-    apollo_remaining_label = (
-        f"{max(apollo_total - apollo_account_used, 0):,}"
-        if apollo_total > 0
-        else "Set total"
-    )
+    credit_summary = load_credit_summary(datetime.utcnow().date().isoformat())
     sent_today = int(today_runs["sent_count"])
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
     send_ready = int(leads["status"].isin(["send_ready", "queued"]).sum()) if not leads.empty else 0
@@ -802,18 +827,18 @@ def overview() -> None:
     with cols[4]:
         metric_card("Failed Sends", failed)
     with cols[5]:
-        metric_card("Apollo Used Today", f"{int(credits)}/{settings.apollo_daily_credit_limit}")
+        metric_card("Apollo Used Today", f"{int(credit_summary['daily_used'])}/{settings.apollo_daily_credit_limit}")
     with cols[6]:
         metric_card(
             "Apollo Monthly Usage",
-            apollo_usage_label,
-            f"From Apollo screenshot. Renewal: {settings.apollo_credit_renewal}.",
+            f"{int(credit_summary['monthly_used']):,}/{int(credit_summary['monthly_available']):,}",
+            "Credits logged by this workflow for the current Apollo credit month.",
         )
     with cols[7]:
         metric_card(
             "Apollo Remaining",
-            apollo_remaining_label,
-            "Calculated as APOLLO_TOTAL_CREDITS minus APOLLO_ACCOUNT_CREDITS_USED.",
+            int(credit_summary["monthly_remaining"]),
+            "Base monthly credits plus top-ups and adjustments minus logged usage.",
         )
 
     st.caption(f"Remaining daily send capacity: {remaining_capacity}")
@@ -968,6 +993,245 @@ def apollo_debugger() -> None:
         st.json(json.loads(latest["params_json"] or "{}"))
 
 
+def _month_options(months_back: int = 18) -> list[date]:
+    today = date.today().replace(day=1)
+    options = []
+    year = today.year
+    month = today.month
+    for _ in range(months_back):
+        options.append(date(year, month, 1))
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    return options
+
+
+def _month_label(month_start: date) -> str:
+    return f"{calendar.month_name[month_start.month]} {month_start.year}"
+
+
+def _credit_health_banner(summary: dict) -> None:
+    remaining = int(summary["monthly_remaining"])
+    available = int(summary["monthly_available"])
+    if summary["health"] == "critical":
+        st.error(
+            "Critical: Apollo credits are close to reserve. "
+            "Enrichment should pause unless manually overridden."
+        )
+    elif summary["health"] == "warning":
+        st.warning("Warning: Apollo credits are below 25%. Consider reducing enrichment limits.")
+    else:
+        st.success("Healthy: You have enough Apollo credits for the current workflow.")
+    st.caption(f"Current remaining balance: {remaining:,} of {available:,} available credits.")
+
+
+def _insert_manual_credit_event(event_type: str, amount: int, event_date: date, note: str) -> None:
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        description = note.strip() or (
+            "Manual Apollo credit top-up entered from dashboard"
+            if event_type == "top_up"
+            else "Manual Apollo credit correction entered from dashboard"
+        )
+        credits_service.record_credit_event(
+            conn,
+            event_type=event_type,
+            credit_cost=0,
+            credit_delta=int(amount),
+            description=description,
+            source="manual_ui",
+            created_at=credits_service.event_created_at_for_date(event_date),
+        )
+
+
+def _remaining_over_time(events: pd.DataFrame, summary: dict) -> pd.DataFrame:
+    start = date.fromisoformat(summary["period_start"])
+    end = date.fromisoformat(summary["period_end"])
+    event_rows = []
+    if not events.empty:
+        normalized = events.copy()
+        normalized["event_date"] = pd.to_datetime(normalized["created_at"]).dt.date
+        event_rows = normalized.to_dict("records")
+    balance = int(summary["base_monthly_credits"])
+    rows = []
+    current = start
+    while current < end:
+        for row in event_rows:
+            if row["event_date"] == current:
+                balance += int(row.get("credit_delta") or 0)
+                balance -= int(row.get("credit_cost") or 0)
+        rows.append({"date": current.isoformat(), "remaining": balance})
+        current += timedelta(days=1)
+    return pd.DataFrame(rows)
+
+
+def apollo_credits_page() -> None:
+    st.header("Apollo Credits")
+    if "credit_success_message" in st.session_state:
+        st.success(st.session_state.pop("credit_success_message"))
+
+    month_options = _month_options()
+    selected_month = st.selectbox(
+        "Credit month",
+        month_options,
+        index=0,
+        format_func=_month_label,
+    )
+    summary = load_credit_summary(selected_month.isoformat())
+    events = load_credit_events(selected_month.isoformat())
+
+    _credit_health_banner(summary)
+
+    cols = st.columns(4)
+    with cols[0]:
+        metric_card("Base Monthly Credits", int(summary["base_monthly_credits"]))
+    with cols[1]:
+        metric_card("Top-ups This Month", int(summary["top_ups"]))
+    with cols[2]:
+        metric_card("Total Available Credits", int(summary["monthly_available"]))
+    with cols[3]:
+        metric_card("Used This Month", int(summary["monthly_used"]))
+
+    cols = st.columns(4)
+    with cols[0]:
+        metric_card("Used Today", int(summary["daily_used"]))
+    with cols[1]:
+        metric_card("Remaining Credits", int(summary["monthly_remaining"]))
+    with cols[2]:
+        metric_card("Estimated Credits Saved", int(summary["estimated_credits_saved"]))
+    with cols[3]:
+        metric_card("Average Used Per Day", f"{summary['average_daily_usage']:.1f}")
+
+    st.subheader("Manual Credit Entries")
+    left, right = st.columns(2)
+    with left:
+        with st.form("apollo_top_up_form"):
+            st.markdown("**Manual Top-Up**")
+            top_up_amount = st.number_input("Top-up amount", min_value=1, step=1, value=500)
+            top_up_date = st.date_input("Date of top-up", value=date.today(), key="top_up_date")
+            top_up_note = st.text_input("Optional note", value="Manual Apollo credit top-up entered from dashboard")
+            submitted = st.form_submit_button("Add top-up")
+            if submitted:
+                _insert_manual_credit_event("top_up", int(top_up_amount), top_up_date, top_up_note)
+                st.cache_data.clear()
+                st.session_state["credit_success_message"] = f"Added {int(top_up_amount):,} Apollo top-up credits."
+                st.rerun()
+    with right:
+        with st.form("apollo_adjustment_form"):
+            st.markdown("**Manual Adjustment**")
+            adjustment_amount = st.number_input("Adjustment amount", step=1, value=0)
+            adjustment_date = st.date_input("Adjustment date", value=date.today(), key="adjustment_date")
+            adjustment_note = st.text_input("Reason/note", value="Manual correction after Apollo usage mismatch")
+            submitted = st.form_submit_button("Add adjustment")
+            if submitted:
+                if int(adjustment_amount) == 0:
+                    st.warning("Enter a positive or negative adjustment amount.")
+                else:
+                    _insert_manual_credit_event("adjustment", int(adjustment_amount), adjustment_date, adjustment_note)
+                    st.cache_data.clear()
+                    st.session_state["credit_success_message"] = f"Added {int(adjustment_amount):,} Apollo credit adjustment."
+                    st.rerun()
+
+    st.subheader("Credit Forecast")
+    forecast_cols = st.columns(4)
+    with forecast_cols[0]:
+        metric_card("Average Daily Usage", f"{summary['average_daily_usage']:.1f}")
+    with forecast_cols[1]:
+        metric_card("Projected Monthly Usage", f"{summary['projected_monthly_usage']:.0f}")
+    with forecast_cols[2]:
+        metric_card("Projected Month-End Remaining", f"{summary['projected_remaining_at_month_end']:.0f}")
+    with forecast_cols[3]:
+        sustainable = "Yes" if summary["projected_remaining_at_month_end"] > settings.min_apollo_credits_reserve else "No"
+        metric_card("Sustainable?", sustainable)
+
+    st.subheader("Usage Charts")
+    if events.empty:
+        st.info("No Apollo credit events have been logged for this month yet.")
+    else:
+        chart_events = events.copy()
+        chart_events["date"] = pd.to_datetime(chart_events["created_at"]).dt.date.astype(str)
+        left, right = st.columns(2)
+        daily_usage = chart_events.groupby("date", as_index=False)["credit_cost"].sum()
+        with left:
+            st.plotly_chart(
+                px.bar(daily_usage, x="date", y="credit_cost", title="Daily Apollo Credits Used"),
+                use_container_width=True,
+            )
+        remaining_daily = _remaining_over_time(chart_events, summary)
+        with right:
+            st.plotly_chart(
+                px.line(remaining_daily, x="date", y="remaining", title="Remaining Credits Over Time"),
+                use_container_width=True,
+            )
+        left, right = st.columns(2)
+        by_type = chart_events.groupby("event_type", as_index=False)["credit_cost"].sum()
+        with left:
+            st.plotly_chart(
+                px.pie(by_type, values="credit_cost", names="event_type", title="Credits Used by Event Type"),
+                use_container_width=True,
+            )
+        top_ups = chart_events[chart_events["credit_delta"] > 0]
+        with right:
+            if top_ups.empty:
+                st.info("No top-ups were entered for this month.")
+            else:
+                st.plotly_chart(
+                    px.bar(top_ups, x="date", y="credit_delta", color="event_type", title="Top-ups and Positive Adjustments"),
+                    use_container_width=True,
+                )
+
+    st.subheader("Credit Usage History")
+    if events.empty:
+        return
+    filter_cols = st.columns(3)
+    with filter_cols[0]:
+        event_filter = st.multiselect("Event type", sorted(events["event_type"].dropna().unique().tolist()))
+    with filter_cols[1]:
+        source_filter = st.multiselect("Source", sorted(events["source"].dropna().unique().tolist()))
+    with filter_cols[2]:
+        start_date, end_date = st.date_input(
+            "Date range",
+            value=(date.fromisoformat(summary["period_start"]), date.fromisoformat(summary["period_end"]) - timedelta(days=1)),
+        )
+
+    filtered = events.copy()
+    filtered["event_date"] = pd.to_datetime(filtered["created_at"]).dt.date
+    if event_filter:
+        filtered = filtered[filtered["event_type"].isin(event_filter)]
+    if source_filter:
+        filtered = filtered[filtered["source"].isin(source_filter)]
+    filtered = filtered[(filtered["event_date"] >= start_date) & (filtered["event_date"] <= end_date)]
+    filtered["Lead/company"] = (
+        filtered["lead_name"].fillna("").astype(str)
+        + filtered["company_name"].fillna("").astype(str).apply(lambda value: f" at {value}" if value else "")
+    ).str.strip()
+    st.dataframe(
+        filtered[
+            [
+                "created_at",
+                "event_type",
+                "Lead/company",
+                "credit_cost",
+                "credit_delta",
+                "source",
+                "description",
+            ]
+        ].rename(
+            columns={
+                "created_at": "Date/time",
+                "event_type": "Event type",
+                "credit_cost": "Credit cost",
+                "credit_delta": "Credit delta",
+                "source": "Source",
+                "description": "Description",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 setup_page()
 st.title("InternReach AI Dashboard")
 st.caption("Local monitoring for Apollo discovery, Gmail readiness, and automation health.")
@@ -977,6 +1241,7 @@ page = st.sidebar.radio(
     [
         "Overview",
         "Daily Review",
+        "Credits",
         "Lead Pipeline",
         "Lead Table",
         "Errors & Failures",
@@ -990,6 +1255,8 @@ with st.spinner("Loading workflow data..."):
         overview()
     elif page == "Daily Review":
         daily_discovery_review()
+    elif page == "Credits":
+        apollo_credits_page()
     elif page == "Lead Pipeline":
         lead_pipeline()
     elif page == "Lead Table":
