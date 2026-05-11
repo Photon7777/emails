@@ -125,21 +125,65 @@ class PostgresConnection:
         if psycopg is None:
             raise RuntimeError("DATABASE_URL is set, but psycopg[binary] is not installed.")
         self.database_url = _normalize_postgres_url(database_url)
-        self._conn = psycopg.connect(self.database_url, row_factory=dict_row)
+        self._conn = self._connect()
+
+    def _connect(self):
+        return psycopg.connect(
+            self.database_url,
+            row_factory=dict_row,
+            connect_timeout=20,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
+
+    def _is_lost_connection(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "connection is lost" in message
+            or "connection is closed" in message
+            or "server closed the connection" in message
+            or "consuming input failed" in message
+            or bool(getattr(self._conn, "closed", False))
+        )
+
+    def _reconnect(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = self._connect()
 
     def execute(self, sql: str, params=()):
-        cursor = self._conn.cursor()
-        cursor.execute(_adapt_sql_for_postgres(sql), params or ())
-        return cursor
+        adapted_sql = _adapt_sql_for_postgres(sql)
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(adapted_sql, params or ())
+            return cursor
+        except psycopg.OperationalError as exc:
+            if not self._is_lost_connection(exc):
+                raise
+            self._reconnect()
+            cursor = self._conn.cursor()
+            cursor.execute(adapted_sql, params or ())
+            return cursor
 
     def commit(self) -> None:
         self._conn.commit()
 
     def rollback(self) -> None:
-        self._conn.rollback()
+        try:
+            self._conn.rollback()
+        except psycopg.OperationalError as exc:
+            if not self._is_lost_connection(exc):
+                raise
 
     def close(self) -> None:
-        self._conn.close()
+        try:
+            self._conn.close()
+        except psycopg.OperationalError:
+            pass
 
     def __enter__(self):
         return self
