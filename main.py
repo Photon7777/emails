@@ -11,6 +11,7 @@ from apollo_client import ApolloClient
 from config import load_settings, ensure_local_folders
 from gmail_client import GmailClient
 from logging_setup import setup_logging
+import umd_ta_ra_workflow
 from workflow import ColdEmailWorkflow
 
 
@@ -74,6 +75,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("export-csv", help="Export SQLite leads to CSV.")
     subparsers.add_parser("rescore", help="Apply current scoring/dedupe gates to existing queued leads.")
     subparsers.add_parser("status", help="Print status counts and today's send count.")
+
+    umd_discover_parser = subparsers.add_parser(
+        "umd-discover",
+        help="Search UMD TA/RA/course support pages and draft reviewable emails without sending.",
+    )
+    umd_discover_parser.add_argument("--max-pages", type=int, help="Limit UMD pages searched in this run.")
+
+    umd_send_parser = subparsers.add_parser(
+        "umd-send-approved",
+        help="Send approved UMD TA/RA drafts. Dry-run by default.",
+    )
+    umd_send_parser.add_argument("--limit", type=int, default=5, help="Maximum approved UMD drafts to process.")
+    umd_send_parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode.")
+    umd_send_parser.add_argument("--live", action="store_true", help="Actually send approved UMD drafts if enabled.")
     return parser
 
 
@@ -126,6 +141,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(counts)
         elif args.command == "status":
             workflow.status_report()
+        elif args.command == "umd-discover":
+            counts = umd_ta_ra_workflow.run_discovery(settings, max_pages=args.max_pages)
+            print(counts)
+        elif args.command == "umd-send-approved":
+            dry_run = _dry_run_from_args(args, settings)
+            counts = umd_ta_ra_workflow.send_approved_drafts(
+                settings,
+                limit=args.limit,
+                dry_run=dry_run,
+            )
+            print(counts)
         else:
             parser.print_help()
             return 2

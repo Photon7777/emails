@@ -410,6 +410,103 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_status ON send_queue(queue_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_send_queue_scheduled ON send_queue(scheduled_send_time)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_contacts (
+            id {id_column},
+            name TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            email_lower TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            source_url TEXT NOT NULL,
+            research_or_course_area TEXT DEFAULT '',
+            opportunity_type TEXT DEFAULT 'General',
+            semester TEXT DEFAULT 'General',
+            fit_score INTEGER DEFAULT 0,
+            fit_reason TEXT DEFAULT '',
+            personalization_notes TEXT DEFAULT '',
+            status TEXT DEFAULT 'discovered',
+            discovered_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_contacted_at TEXT DEFAULT '',
+            email_draft_id INTEGER DEFAULT 0,
+            raw_text TEXT DEFAULT '',
+            raw_json TEXT DEFAULT '{{}}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_contacts_email_unique
+        ON umd_ta_ra_contacts(email_lower)
+        WHERE email_lower IS NOT NULL AND email_lower != ''
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_status ON umd_ta_ra_contacts(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_department ON umd_ta_ra_contacts(department)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_fit_score ON umd_ta_ra_contacts(fit_score)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_source_url ON umd_ta_ra_contacts(source_url)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_email_drafts (
+            id {id_column},
+            contact_id INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'drafted',
+            approved_at TEXT DEFAULT '',
+            sent_at TEXT DEFAULT '',
+            gmail_message_id TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            error_message TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_drafts_contact_unique
+        ON umd_ta_ra_email_drafts(contact_id)
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_drafts_status ON umd_ta_ra_email_drafts(status)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_outreach_logs (
+            id {id_column},
+            run_id INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            source_url TEXT DEFAULT '',
+            message TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_logs_run_id ON umd_ta_ra_outreach_logs(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_logs_created_at ON umd_ta_ra_outreach_logs(created_at)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_workflow_runs (
+            id {id_column},
+            run_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            pages_searched INTEGER DEFAULT 0,
+            contacts_discovered INTEGER DEFAULT 0,
+            high_fit_contacts INTEGER DEFAULT 0,
+            emails_drafted INTEGER DEFAULT 0,
+            emails_approved INTEGER DEFAULT 0,
+            emails_sent INTEGER DEFAULT 0,
+            duplicates_removed INTEGER DEFAULT 0,
+            missing_emails INTEGER DEFAULT 0,
+            error_summary TEXT DEFAULT '',
+            details_json TEXT DEFAULT '{{}}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_runs_started_at ON umd_ta_ra_workflow_runs(started_at)")
     _migrate_apollo_usage_to_credit_events(conn)
     conn.commit()
 

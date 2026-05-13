@@ -17,6 +17,7 @@ from config import load_settings
 import db
 from email_template import render_email
 from lead import Lead, utc_now_iso
+import umd_ta_ra_workflow
 
 
 def apply_streamlit_secrets_to_env() -> None:
@@ -244,6 +245,65 @@ def load_discovery_search_logs(run_id: int | None) -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=20)
+def load_umd_ta_ra_contacts() -> pd.DataFrame:
+    return read_sql(
+        """
+        SELECT
+            c.id,
+            c.name,
+            c.email,
+            c.title,
+            c.department,
+            c.source_url,
+            c.research_or_course_area,
+            c.opportunity_type,
+            c.semester,
+            c.fit_score,
+            c.fit_reason,
+            c.personalization_notes,
+            c.status,
+            c.discovered_at,
+            c.updated_at,
+            c.last_contacted_at,
+            c.email_draft_id,
+            d.subject,
+            d.body,
+            d.status AS draft_status,
+            d.approved_at,
+            d.sent_at,
+            d.error_message AS draft_error
+        FROM umd_ta_ra_contacts c
+        LEFT JOIN umd_ta_ra_email_drafts d ON d.id = c.email_draft_id
+        ORDER BY c.fit_score DESC, c.updated_at DESC, c.id DESC
+        """
+    )
+
+
+@st.cache_data(ttl=20)
+def load_umd_ta_ra_runs() -> pd.DataFrame:
+    return read_sql(
+        """
+        SELECT *
+        FROM umd_ta_ra_workflow_runs
+        ORDER BY started_at DESC, id DESC
+        LIMIT 100
+        """
+    )
+
+
+@st.cache_data(ttl=20)
+def load_umd_ta_ra_logs() -> pd.DataFrame:
+    return read_sql(
+        """
+        SELECT *
+        FROM umd_ta_ra_outreach_logs
+        ORDER BY created_at DESC, id DESC
+        LIMIT 300
+        """
+    )
+
+
 def next_8am_iso() -> str:
     now = datetime.now()
     send_time = now.replace(hour=8, minute=0, second=0, microsecond=0)
@@ -356,8 +416,13 @@ def status_badge(status: str) -> str:
         "scored": "#2563eb",
         "enriched": "#7c3aed",
         "send_ready": "#059669",
+        "drafted": "#2563eb",
+        "approved": "#0f766e",
         "queued": "#0f766e",
         "sent": "#16a34a",
+        "contacted": "#16a34a",
+        "follow_up_needed": "#7c3aed",
+        "not_relevant": "#64748b",
         "rejected": "#dc2626",
         "skipped": "#b45309",
         "failed": "#b91c1c",
@@ -1232,6 +1297,225 @@ def apollo_credits_page() -> None:
     )
 
 
+def umd_ta_ra_outreach_page() -> None:
+    st.header("UMD TA/RA Outreach")
+    st.caption("Separate workflow for UMD teaching assistant, research assistant, grader, course support, lab assistant, and faculty assistant outreach.")
+    st.info("This workflow uses separate UMD tables and does not touch the internship Apollo workflow or the 8:00 AM internship sender.")
+
+    contacts = load_umd_ta_ra_contacts()
+    runs = load_umd_ta_ra_runs()
+    logs = load_umd_ta_ra_logs()
+
+    latest_run = runs.iloc[0] if not runs.empty else None
+    approved_count = int((contacts["status"] == "approved").sum()) if not contacts.empty else 0
+    sent_count = int((contacts["status"] == "sent").sum()) if not contacts.empty else 0
+    drafted_count = int(contacts["draft_status"].fillna("").isin(["drafted", "approved", "sent"]).sum()) if not contacts.empty else 0
+    high_fit_count = int((contacts["fit_score"].fillna(0).astype(int) >= settings.umd_ta_ra_high_fit_score).sum()) if not contacts.empty else 0
+
+    cols = st.columns(6)
+    with cols[0]:
+        metric_card("Last Run", latest_run["started_at"] if latest_run is not None else "Never")
+    with cols[1]:
+        metric_card("Contacts Discovered", len(contacts))
+    with cols[2]:
+        metric_card("High-Fit Contacts", high_fit_count)
+    with cols[3]:
+        metric_card("Emails Drafted", drafted_count)
+    with cols[4]:
+        metric_card("Emails Approved", approved_count)
+    with cols[5]:
+        metric_card("Emails Sent", sent_count)
+
+    with st.expander("Run UMD discovery manually", expanded=contacts.empty):
+        max_pages = st.number_input("Maximum pages to search this run", min_value=1, max_value=100, value=min(settings.umd_ta_ra_max_pages, 30))
+        st.caption("Discovery is read-only against UMD/public search pages and drafts emails for review. It does not send.")
+        if st.button("Run UMD TA/RA Discovery", type="primary"):
+            with st.spinner("Searching UMD pages and drafting reviewable emails..."):
+                try:
+                    counts = umd_ta_ra_workflow.run_discovery(settings, max_pages=int(max_pages))
+                    st.success(f"Discovery finished: {counts}")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"UMD discovery failed: {exc}")
+
+    if contacts.empty:
+        st.info("No UMD TA/RA contacts yet. Run discovery to populate this page.")
+        return
+
+    st.subheader("Contact Discovery Table")
+    filters = st.columns(5)
+    with filters[0]:
+        department_filter = st.multiselect("Department", sorted(contacts["department"].dropna().unique().tolist()))
+    with filters[1]:
+        type_filter = st.multiselect("Opportunity type", sorted(contacts["opportunity_type"].dropna().unique().tolist()))
+    with filters[2]:
+        min_score = st.slider("Fit score threshold", 0, 100, settings.umd_ta_ra_min_fit_score)
+    with filters[3]:
+        email_filter = st.selectbox("Email availability", ["All", "Has email", "Missing email"])
+    with filters[4]:
+        semester_filter = st.multiselect("Semester", sorted(contacts["semester"].dropna().unique().tolist()))
+
+    filtered = contacts.copy()
+    filtered["fit_score"] = filtered["fit_score"].fillna(0).astype(int)
+    if department_filter:
+        filtered = filtered[filtered["department"].isin(department_filter)]
+    if type_filter:
+        filtered = filtered[filtered["opportunity_type"].isin(type_filter)]
+    if semester_filter:
+        filtered = filtered[filtered["semester"].isin(semester_filter)]
+    filtered = filtered[filtered["fit_score"] >= min_score]
+    if email_filter == "Has email":
+        filtered = filtered[filtered["email"].fillna("").str.len() > 0]
+    elif email_filter == "Missing email":
+        filtered = filtered[filtered["email"].fillna("").str.len() == 0]
+
+    table = filtered[
+        [
+            "id",
+            "name",
+            "title",
+            "department",
+            "email",
+            "opportunity_type",
+            "semester",
+            "research_or_course_area",
+            "fit_score",
+            "source_url",
+            "status",
+            "draft_status",
+            "updated_at",
+        ]
+    ].rename(
+        columns={
+            "name": "Name",
+            "title": "Title",
+            "department": "Department",
+            "email": "Email",
+            "opportunity_type": "Opportunity type",
+            "semester": "Semester",
+            "research_or_course_area": "Course or research area",
+            "fit_score": "Fit score",
+            "source_url": "Source URL",
+            "status": "Status",
+            "draft_status": "Draft status",
+            "updated_at": "Last updated",
+        }
+    )
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.subheader("Email Preview and Review")
+    selectable = filtered[filtered["email"].fillna("").str.len() > 0].copy()
+    if selectable.empty:
+        st.info("No filtered contacts with email addresses are available for draft review.")
+    else:
+        selected_id = st.selectbox(
+            "Select a contact",
+            selectable["id"].tolist(),
+            format_func=lambda value: (
+                f"{selectable.loc[selectable['id'] == value, 'name'].iloc[0]} | "
+                f"{selectable.loc[selectable['id'] == value, 'department'].iloc[0]} | "
+                f"{int(selectable.loc[selectable['id'] == value, 'fit_score'].iloc[0])}"
+            ),
+        )
+        selected = selectable[selectable["id"] == selected_id].iloc[0]
+        st.markdown(f"**Status:** {status_badge(str(selected['status']))}", unsafe_allow_html=True)
+        st.caption(f"Resume attachment: {'enabled' if settings.attach_resume and settings.resume_file.exists() else 'not available'}")
+        st.caption(f"Source: {selected['source_url']}")
+        st.write(f"**Why this contact:** {selected['fit_reason']}")
+        st.write(f"**Personalization notes:** {selected['personalization_notes']}")
+
+        subject = st.text_input("Subject line", value=str(selected.get("subject") or "MSIS Student Interested in TA/RA or Course Support Opportunities"))
+        body = st.text_area("Drafted email body", value=str(selected.get("body") or ""), height=320)
+        action_cols = st.columns(6)
+        with action_cols[0]:
+            if st.button("Save draft edits"):
+                umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
+                st.success("Draft saved.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[1]:
+            if st.button("Approve draft"):
+                umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
+                umd_ta_ra_workflow.approve_draft(settings, int(selected_id))
+                st.success("Draft approved. It will not send until you explicitly run the UMD sender.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[2]:
+            if st.button("Skip contact"):
+                umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "skipped", "Skipped from UMD TA/RA dashboard")
+                st.success("Contact skipped.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[3]:
+            if st.button("Mark follow-up needed"):
+                umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "follow_up_needed", "Follow-up needed")
+                st.success("Marked follow-up needed.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[4]:
+            if st.button("Mark contacted"):
+                umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "contacted", "Contacted outside the automated sender")
+                st.success("Marked contacted.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[5]:
+            if st.button("Not relevant"):
+                umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "not_relevant", "Marked not relevant from UMD TA/RA dashboard")
+                st.success("Marked not relevant.")
+                st.cache_data.clear()
+                st.rerun()
+
+    with st.expander("Send approved UMD drafts manually"):
+        st.warning("Sending from this UMD workflow is separate from the internship sender and requires explicit confirmation.")
+        send_limit = st.number_input("Send limit", min_value=1, max_value=25, value=5)
+        dry_run = st.checkbox("Dry-run only", value=True)
+        confirmation = st.text_input('Type "SEND UMD" to send approved drafts live')
+        if st.button("Run UMD approved-draft sender"):
+            live_allowed = confirmation == "SEND UMD" and not dry_run
+            if live_allowed and not settings.umd_ta_ra_send_enabled:
+                st.error("UMD_TA_RA_SEND_ENABLED is false. Enable it in local .env before live UMD sending.")
+            else:
+                with st.spinner("Processing approved UMD drafts..."):
+                    counts = umd_ta_ra_workflow.send_approved_drafts(settings, limit=int(send_limit), dry_run=not live_allowed)
+                st.success(f"UMD sender completed: {counts}")
+                st.cache_data.clear()
+                st.rerun()
+
+    st.subheader("UMD Workflow Runs")
+    if runs.empty:
+        st.info("No UMD workflow runs yet.")
+    else:
+        st.dataframe(
+            runs[
+                [
+                    "id",
+                    "run_type",
+                    "started_at",
+                    "completed_at",
+                    "status",
+                    "pages_searched",
+                    "contacts_discovered",
+                    "high_fit_contacts",
+                    "emails_drafted",
+                    "emails_approved",
+                    "emails_sent",
+                    "duplicates_removed",
+                    "missing_emails",
+                    "error_summary",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Logs and Errors")
+    if logs.empty:
+        st.info("No UMD logs yet.")
+    else:
+        st.dataframe(logs, use_container_width=True, hide_index=True)
+
+
 setup_page()
 st.title("InternReach AI Dashboard")
 st.caption("Local monitoring for Apollo discovery, Gmail readiness, and automation health.")
@@ -1242,6 +1526,7 @@ page = st.sidebar.radio(
         "Overview",
         "Daily Review",
         "Credits",
+        "UMD TA/RA Outreach",
         "Lead Pipeline",
         "Lead Table",
         "Errors & Failures",
@@ -1257,6 +1542,8 @@ with st.spinner("Loading workflow data..."):
         daily_discovery_review()
     elif page == "Credits":
         apollo_credits_page()
+    elif page == "UMD TA/RA Outreach":
+        umd_ta_ra_outreach_page()
     elif page == "Lead Pipeline":
         lead_pipeline()
     elif page == "Lead Table":

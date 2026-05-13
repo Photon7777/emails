@@ -312,6 +312,43 @@ Credit guardrails run before Apollo enrichment:
 
 Only Apollo actions that are expected to consume credits are logged as credit usage. Local scoring, filtering, deduplication, and rejected leads do not count as used credits. Rejected-before-enrichment leads are counted only in the estimated credits saved metric.
 
+## UMD TA/RA Outreach
+
+The project also includes a separate **UMD TA/RA Outreach** workflow for Teaching Assistant, Research Assistant, Grader, Course Support, Lab Assistant, and Faculty Assistant opportunities at the University of Maryland, College Park.
+
+This workflow is intentionally separate from the internship Apollo workflow:
+
+- It uses separate tables: `umd_ta_ra_contacts`, `umd_ta_ra_email_drafts`, `umd_ta_ra_outreach_logs`, and `umd_ta_ra_workflow_runs`.
+- It does not use Apollo credits.
+- It does not touch `leads`, `send_queue`, or the 8:00 AM internship sender.
+- It drafts emails for review and requires manual approval before anything can be sent.
+
+Configuration:
+
+```bash
+UMD_TA_RA_MAX_PAGES=30
+UMD_TA_RA_SEARCH_RESULTS_PER_QUERY=5
+UMD_TA_RA_REQUEST_DELAY_SECONDS=1
+UMD_TA_RA_MIN_FIT_SCORE=55
+UMD_TA_RA_HIGH_FIT_SCORE=70
+UMD_TA_RA_SEND_ENABLED=false
+```
+
+Manual commands:
+
+```bash
+python main.py umd-discover --max-pages 20
+python main.py umd-send-approved --dry-run --limit 5
+```
+
+For live UMD TA/RA sending, set `UMD_TA_RA_SEND_ENABLED=true`, approve drafts in the dashboard, and run:
+
+```bash
+python main.py umd-send-approved --live --limit 5
+```
+
+The Streamlit dashboard has a sidebar page called **UMD TA/RA Outreach** where you can run discovery, filter contacts, review/edit drafts, approve, skip, mark follow-up needed, and view UMD-specific logs. A separate optional launchd plist is provided at `launchd/com.sai.umd-ta-ra-discover.plist`; load it only if you want this UMD discovery workflow scheduled independently.
+
 ## Manual Test Commands
 
 Run these before scheduling anything:

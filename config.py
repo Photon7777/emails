@@ -84,6 +84,12 @@ class Settings:
     max_contacts_per_company_per_week: int
     lead_score_threshold: int
     allow_unverified_email_patterns: bool
+    umd_ta_ra_max_pages: int
+    umd_ta_ra_search_results_per_query: int
+    umd_ta_ra_request_delay_seconds: int
+    umd_ta_ra_min_fit_score: int
+    umd_ta_ra_high_fit_score: int
+    umd_ta_ra_send_enabled: bool
 
     gmail_credentials_file: Path
     gmail_token_file: Path
@@ -168,6 +174,12 @@ def load_settings() -> Settings:
         max_contacts_per_company_per_week=_get_int("MAX_CONTACTS_PER_COMPANY_PER_WEEK", 2),
         lead_score_threshold=_get_int("MIN_SCORE_TO_SEND", _get_int("LEAD_SCORE_THRESHOLD", 70)),
         allow_unverified_email_patterns=_get_bool("ALLOW_UNVERIFIED_EMAIL_PATTERNS", False),
+        umd_ta_ra_max_pages=_get_int("UMD_TA_RA_MAX_PAGES", 30),
+        umd_ta_ra_search_results_per_query=_get_int("UMD_TA_RA_SEARCH_RESULTS_PER_QUERY", 5),
+        umd_ta_ra_request_delay_seconds=_get_int("UMD_TA_RA_REQUEST_DELAY_SECONDS", 1),
+        umd_ta_ra_min_fit_score=_get_int("UMD_TA_RA_MIN_FIT_SCORE", 55),
+        umd_ta_ra_high_fit_score=_get_int("UMD_TA_RA_HIGH_FIT_SCORE", 70),
+        umd_ta_ra_send_enabled=_get_bool("UMD_TA_RA_SEND_ENABLED", False),
         gmail_credentials_file=_path_from_env("GMAIL_CREDENTIALS_FILE", "credentials.json"),
         gmail_token_file=_path_from_env("GMAIL_TOKEN_FILE", "token.json"),
         sender_name=_get_str("SENDER_NAME"),
