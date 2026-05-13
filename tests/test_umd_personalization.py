@@ -50,6 +50,9 @@ def make_contact(**overrides):
         personalization_context="",
         personalization_source="Fallback",
         personalization_confidence="Low",
+        fit_bucket="High Fit",
+        contact_type="Professor",
+        campaign_name="",
         raw_text=BAD_CARD_TEXT,
     )
     base.update(overrides)

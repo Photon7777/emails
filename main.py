@@ -81,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Search UMD TA/RA/course support pages and draft reviewable emails without sending.",
     )
     umd_discover_parser.add_argument("--max-pages", type=int, help="Limit UMD pages searched in this run.")
+    umd_discover_parser.add_argument("--target-contacts", type=int, help="Target Good/High Fit UMD contacts.")
+    umd_discover_parser.add_argument("--max-contacts", type=int, help="Maximum new UMD contacts to add.")
+    umd_discover_parser.add_argument("--search-depth", choices=["standard", "expanded", "aggressive"], default="standard")
+    umd_discover_parser.add_argument("--min-score", type=int, help="Minimum fit score to keep.")
 
     umd_send_parser = subparsers.add_parser(
         "umd-send-approved",
@@ -89,6 +93,21 @@ def build_parser() -> argparse.ArgumentParser:
     umd_send_parser.add_argument("--limit", type=int, default=5, help="Maximum approved UMD drafts to process.")
     umd_send_parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode.")
     umd_send_parser.add_argument("--live", action="store_true", help="Actually send approved UMD drafts if enabled.")
+
+    umd_campaign_parser = subparsers.add_parser("umd-create-campaign", help="Create a UMD TA/RA campaign from approved drafts.")
+    umd_campaign_parser.add_argument("--name", required=True, help="Campaign name.")
+    umd_campaign_parser.add_argument("--semester", default="Both", help="Summer 2026, Fall 2026, Both, or General.")
+    umd_campaign_parser.add_argument("--min-score", type=int, default=65)
+    umd_campaign_parser.add_argument("--max-emails", type=int, help="Maximum campaign recipients.")
+
+    umd_campaign_send_parser = subparsers.add_parser("umd-send-campaign", help="Dry-run or send a UMD TA/RA campaign with randomized lag.")
+    umd_campaign_send_parser.add_argument("--campaign-id", type=int, required=True)
+    umd_campaign_send_parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode.")
+    umd_campaign_send_parser.add_argument("--live", action="store_true", help="Actually send campaign emails if enabled.")
+    umd_campaign_send_parser.add_argument("--min-delay", type=int, help="Minimum delay seconds.")
+    umd_campaign_send_parser.add_argument("--max-delay", type=int, help="Maximum delay seconds.")
+    umd_campaign_send_parser.add_argument("--daily-limit", type=int, help="Daily send limit.")
+    umd_campaign_send_parser.add_argument("--max-emails", type=int, help="Maximum emails to process.")
     return parser
 
 
@@ -142,7 +161,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.command == "status":
             workflow.status_report()
         elif args.command == "umd-discover":
-            counts = umd_ta_ra_workflow.run_discovery(settings, max_pages=args.max_pages)
+            counts = umd_ta_ra_workflow.run_discovery(
+                settings,
+                max_pages=args.max_pages,
+                target_contacts=args.target_contacts,
+                max_contacts=args.max_contacts,
+                search_depth=args.search_depth,
+                min_score=args.min_score,
+            )
             print(counts)
         elif args.command == "umd-send-approved":
             dry_run = _dry_run_from_args(args, settings)
@@ -150,6 +176,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                 settings,
                 limit=args.limit,
                 dry_run=dry_run,
+            )
+            print(counts)
+        elif args.command == "umd-create-campaign":
+            campaign_id, counts = umd_ta_ra_workflow.create_campaign(
+                settings,
+                campaign_name=args.name,
+                semester_target=args.semester,
+                min_score=args.min_score,
+                max_emails=args.max_emails,
+            )
+            print({"campaign_id": campaign_id, **counts})
+        elif args.command == "umd-send-campaign":
+            dry_run = _dry_run_from_args(args, settings)
+            counts = umd_ta_ra_workflow.run_campaign_send(
+                settings,
+                campaign_id=args.campaign_id,
+                dry_run=dry_run,
+                min_delay_seconds=args.min_delay,
+                max_delay_seconds=args.max_delay,
+                daily_send_limit=args.daily_limit,
+                max_emails=args.max_emails,
+                sleep_between=not dry_run,
             )
             print(counts)
         else:

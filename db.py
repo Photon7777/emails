@@ -435,6 +435,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             personalization_context TEXT DEFAULT '',
             personalization_source TEXT DEFAULT 'Fallback',
             personalization_confidence TEXT DEFAULT 'Low',
+            fit_bucket TEXT DEFAULT 'Low Fit',
+            contact_type TEXT DEFAULT '',
+            campaign_name TEXT DEFAULT '',
             status TEXT DEFAULT 'discovered',
             discovered_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -445,6 +448,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_umd_ta_ra_columns(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_contacts_email_unique
@@ -455,7 +459,20 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_status ON umd_ta_ra_contacts(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_department ON umd_ta_ra_contacts(department)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_fit_score ON umd_ta_ra_contacts(fit_score)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_fit_bucket ON umd_ta_ra_contacts(fit_bucket)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_source_url ON umd_ta_ra_contacts(source_url)")
+    conn.execute(
+        """
+        UPDATE umd_ta_ra_contacts
+        SET fit_bucket = CASE
+            WHEN COALESCE(fit_score, 0) >= 80 THEN 'High Fit'
+            WHEN COALESCE(fit_score, 0) >= 65 THEN 'Good Fit'
+            WHEN COALESCE(fit_score, 0) >= 50 THEN 'Medium Fit'
+            ELSE 'Low Fit'
+        END
+        WHERE fit_bucket IS NULL OR fit_bucket = ''
+        """
+    )
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS umd_ta_ra_email_drafts (
@@ -475,7 +492,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    _ensure_umd_ta_ra_columns(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_drafts_contact_unique
@@ -499,6 +515,76 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_logs_created_at ON umd_ta_ra_outreach_logs(created_at)")
     conn.execute(
         f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_campaigns (
+            id {id_column},
+            campaign_name TEXT NOT NULL,
+            semester_target TEXT DEFAULT 'General',
+            target_contact_count INTEGER DEFAULT 75,
+            selected_contacts_count INTEGER DEFAULT 0,
+            approved_drafts_count INTEGER DEFAULT 0,
+            sent_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            skipped_count INTEGER DEFAULT 0,
+            dry_run_count INTEGER DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'draft',
+            min_delay_seconds INTEGER DEFAULT 90,
+            max_delay_seconds INTEGER DEFAULT 240,
+            daily_send_limit INTEGER DEFAULT 40,
+            max_emails INTEGER DEFAULT 100,
+            start_time TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT DEFAULT '',
+            completed_at TEXT DEFAULT '',
+            details_json TEXT DEFAULT '{{}}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_campaigns_status ON umd_ta_ra_campaigns(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_campaigns_created_at ON umd_ta_ra_campaigns(created_at)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_campaign_recipients (
+            id {id_column},
+            campaign_id INTEGER NOT NULL,
+            contact_id INTEGER NOT NULL,
+            draft_id INTEGER NOT NULL,
+            send_status TEXT NOT NULL DEFAULT 'pending',
+            scheduled_send_time TEXT DEFAULT '',
+            actual_send_time TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            retry_count INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_campaign_recipient_unique
+        ON umd_ta_ra_campaign_recipients(campaign_id, contact_id)
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_campaign_recipients_campaign ON umd_ta_ra_campaign_recipients(campaign_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_campaign_recipients_status ON umd_ta_ra_campaign_recipients(send_status)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_contact_history (
+            id {id_column},
+            contact_id INTEGER NOT NULL,
+            campaign_id INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            email_status TEXT DEFAULT '',
+            campaign_name TEXT DEFAULT '',
+            event_at TEXT NOT NULL,
+            notes TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contact_history_contact ON umd_ta_ra_contact_history(contact_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contact_history_event_at ON umd_ta_ra_contact_history(event_at)")
+    conn.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS umd_ta_ra_workflow_runs (
             id {id_column},
             run_type TEXT NOT NULL,
@@ -519,6 +605,34 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_runs_started_at ON umd_ta_ra_workflow_runs(started_at)")
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS umd_ta_ra_discovery_runs (
+            id {id_column},
+            workflow_run_id INTEGER DEFAULT 0,
+            started_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            search_depth TEXT DEFAULT 'standard',
+            target_contact_count INTEGER DEFAULT 75,
+            max_contacts INTEGER DEFAULT 100,
+            pages_searched INTEGER DEFAULT 0,
+            sources_searched INTEGER DEFAULT 0,
+            contacts_discovered INTEGER DEFAULT 0,
+            high_fit_contacts INTEGER DEFAULT 0,
+            good_fit_contacts INTEGER DEFAULT 0,
+            medium_fit_contacts INTEGER DEFAULT 0,
+            low_fit_contacts INTEGER DEFAULT 0,
+            emails_drafted INTEGER DEFAULT 0,
+            duplicates_removed INTEGER DEFAULT 0,
+            missing_emails INTEGER DEFAULT 0,
+            failed_pages INTEGER DEFAULT 0,
+            error_summary TEXT DEFAULT '',
+            details_json TEXT DEFAULT '{{}}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_discovery_runs_started_at ON umd_ta_ra_discovery_runs(started_at)")
     _migrate_apollo_usage_to_credit_events(conn)
     conn.commit()
 
@@ -630,6 +744,9 @@ def _ensure_umd_ta_ra_columns(conn: sqlite3.Connection) -> None:
             "personalization_context": "TEXT DEFAULT ''",
             "personalization_source": "TEXT DEFAULT 'Fallback'",
             "personalization_confidence": "TEXT DEFAULT 'Low'",
+            "fit_bucket": "TEXT DEFAULT 'Low Fit'",
+            "contact_type": "TEXT DEFAULT ''",
+            "campaign_name": "TEXT DEFAULT ''",
         },
     )
     _add_missing_columns(

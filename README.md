@@ -332,22 +332,37 @@ UMD_TA_RA_REQUEST_DELAY_SECONDS=1
 UMD_TA_RA_MIN_FIT_SCORE=55
 UMD_TA_RA_HIGH_FIT_SCORE=70
 UMD_TA_RA_SEND_ENABLED=false
+UMD_TA_RA_TARGET_CONTACTS=75
+UMD_TA_RA_MAX_CONTACTS=100
+UMD_TA_RA_DEFAULT_DAILY_LIMIT=40
+UMD_TA_RA_MIN_SEND_DELAY_SECONDS=90
+UMD_TA_RA_MAX_SEND_DELAY_SECONDS=240
 ```
 
 Manual commands:
 
 ```bash
-python main.py umd-discover --max-pages 20
-python main.py umd-send-approved --dry-run --limit 5
+python main.py umd-discover --search-depth expanded --target-contacts 75 --max-contacts 100 --max-pages 120 --min-score 50
+python main.py umd-create-campaign --name "UMD TA/RA Summer/Fall 2026 Outreach" --semester Both --min-score 65 --max-emails 40
+python main.py umd-send-campaign --campaign-id 1 --dry-run --min-delay 90 --max-delay 240 --daily-limit 40
 ```
 
-For live UMD TA/RA sending, set `UMD_TA_RA_SEND_ENABLED=true`, approve drafts in the dashboard, and run:
+For live UMD TA/RA campaign sending, set `UMD_TA_RA_SEND_ENABLED=true`, approve drafts in the dashboard, and run:
 
 ```bash
-python main.py umd-send-approved --live --limit 5
+python main.py umd-send-campaign --campaign-id 1 --live --min-delay 90 --max-delay 240 --daily-limit 40
 ```
 
-The Streamlit dashboard has a sidebar page called **UMD TA/RA Outreach** where you can run discovery, filter contacts, review/edit drafts, approve, skip, mark follow-up needed, and view UMD-specific logs. A separate optional launchd plist is provided at `launchd/com.sai.umd-ta-ra-discover.plist`; load it only if you want this UMD discovery workflow scheduled independently.
+The Streamlit dashboard has a sidebar page called **UMD TA/RA Outreach** where you can run expanded discovery, filter contacts, review/edit drafts, bulk generate drafts, bulk approve reviewed drafts, create campaigns, dry-run randomized send schedules, pause/resume/stop campaigns, and view UMD-specific logs. A separate optional launchd plist is provided at `launchd/com.sai.umd-ta-ra-discover.plist`; load it only if you want this UMD discovery workflow scheduled independently.
+
+UMD fit buckets:
+
+- `High Fit`: 80-100
+- `Good Fit`: 65-79
+- `Medium Fit`: 50-64
+- `Low Fit`: below 50
+
+Default bulk campaigns use only approved `High Fit` and `Good Fit` drafts unless you manually override the selection. Dry-run mode is the default and simulates the order, randomized delay schedule, skipped duplicates, and validation failures without sending Gmail messages.
 
 UMD draft quality guardrails:
 

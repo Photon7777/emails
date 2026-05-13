@@ -8,9 +8,11 @@ the 8 AM internship sender.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from html import unescape
 import json
 import logging
+import random
 import re
 import time
 from typing import Iterable
@@ -69,6 +71,35 @@ SEARCH_QUERIES = [
     "site:umd.edu assistantship opportunities",
 ]
 
+EXPANDED_SEARCH_QUERIES = [
+    "site:umd.edu faculty data analytics",
+    "site:umd.edu faculty artificial intelligence",
+    "site:umd.edu faculty machine learning",
+    "site:umd.edu business analytics professor",
+    "site:umd.edu information systems faculty",
+    "site:umd.edu computer science faculty data mining",
+    "site:umd.edu research assistant professor data",
+    "site:umd.edu lab director analytics",
+    "site:umd.edu graduate assistantship teaching assistant",
+    "site:umd.edu grader position",
+    "site:umd.edu teaching assistant position",
+    "site:umd.edu course assistant",
+    "site:umd.edu faculty directory statistics",
+    "site:umd.edu marketing analytics professor",
+    "site:umd.edu operations analytics professor",
+    "site:umd.edu database systems professor",
+    "site:umd.edu data visualization professor",
+    "site:umd.edu AI lab UMD",
+    "site:umd.edu machine learning lab UMD",
+    "site:umd.edu public policy data analytics faculty",
+    "site:umd.edu economics data science faculty",
+    "site:umd.edu finance analytics faculty",
+    "site:umd.edu supply chain analytics professor",
+    "site:umd.edu human computer interaction faculty",
+    "site:umd.edu behavioral analytics faculty",
+    "site:umd.edu data science research group UMD",
+]
+
 SEED_URLS = [
     "https://www.rhsmith.umd.edu/directory",
     "https://ischool.umd.edu/directory/",
@@ -81,6 +112,36 @@ SEED_URLS = [
     "https://ischool.umd.edu/research/",
 ]
 
+EXPANDED_SEED_URLS = [
+    "https://www.rhsmith.umd.edu/directory",
+    "https://www.rhsmith.umd.edu/faculty-research/academic-departments/decision-operations-information-technologies",
+    "https://www.rhsmith.umd.edu/faculty-research/academic-departments/marketing",
+    "https://www.rhsmith.umd.edu/faculty-research/academic-departments/finance",
+    "https://www.rhsmith.umd.edu/faculty-research/academic-departments/management-organization",
+    "https://ischool.umd.edu/directory/",
+    "https://ischool.umd.edu/research/",
+    "https://www.cs.umd.edu/people/faculty",
+    "https://www.cs.umd.edu/research",
+    "https://ece.umd.edu/clark/faculty",
+    "https://ece.umd.edu/research",
+    "https://me.umd.edu/faculty",
+    "https://me.umd.edu/research",
+    "https://eng.umd.edu/faculty",
+    "https://eng.umd.edu/research",
+    "https://amsc.umd.edu/people",
+    "https://www.math.umd.edu/people/faculty.html",
+    "https://www-math.umd.edu/people/faculty.html",
+    "https://stat.umd.edu/people",
+    "https://econ.umd.edu/faculty",
+    "https://spp.umd.edu/our-community/faculty-staff",
+    "https://psyc.umd.edu/people/faculty",
+    "https://hcil.umd.edu/people/",
+    "https://umiacs.umd.edu/people",
+    "https://ai.umd.edu/",
+    "https://science.umd.edu/",
+    "https://biology.umd.edu/research.html",
+]
+
 DEPARTMENT_KEYWORDS = {
     "Robert H. Smith School of Business": ("rhsmith", "smith school", "business school", "decision sciences", "information systems", "marketing", "operations"),
     "Information Studies / iSchool": ("ischool", "information studies", "information science"),
@@ -90,6 +151,10 @@ DEPARTMENT_KEYWORDS = {
     "Economics": ("economics", "econ.umd"),
     "Statistics / Mathematics": ("statistics", "mathematics", "math.umd"),
     "Data Science / Analytics": ("data science", "analytics", "business analytics", "database", "ai", "ml"),
+    "Finance": ("finance", "financial analytics"),
+    "Supply Chain": ("supply chain", "logistics"),
+    "Psychology / Behavioral Analytics": ("psychology", "behavioral", "psyc.umd"),
+    "Human-Computer Interaction": ("human-computer interaction", "hci", "hcil"),
 }
 
 SKILL_KEYWORDS = (
@@ -109,6 +174,16 @@ SKILL_KEYWORDS = (
     "marketing analytics",
     "visualization",
     "research",
+    "data science",
+    "data mining",
+    "cloud",
+    "statistics",
+    "optimization",
+    "supply chain",
+    "finance",
+    "behavioral",
+    "human-computer interaction",
+    "hci",
 )
 OPPORTUNITY_KEYWORDS = {
     "TA": ("teaching assistant", "graduate assistant", "undergraduate ta", "ta position", "ta"),
@@ -118,6 +193,18 @@ OPPORTUNITY_KEYWORDS = {
     "Faculty Assistant": ("faculty assistant", "program coordinator", "academic coordinator"),
 }
 TITLE_KEYWORDS = ("professor", "lecturer", "instructor", "faculty", "coordinator", "director", "research scientist")
+CONTACT_TYPE_KEYWORDS = {
+    "Professor": ("professor",),
+    "Associate Professor": ("associate professor",),
+    "Assistant Professor": ("assistant professor",),
+    "Lecturer": ("lecturer",),
+    "Clinical Professor": ("clinical professor",),
+    "Research Professor": ("research professor", "research scientist"),
+    "Lab Director": ("lab director", "director"),
+    "Program Director": ("program director", "director"),
+    "Course Coordinator": ("course coordinator", "academic coordinator", "program coordinator"),
+    "Graduate Program Coordinator": ("graduate program coordinator",),
+}
 PERSON_TITLE_RE = re.compile(
     r"\b(?:Tyser\s+)?(?:Assistant|Associate|Clinical|Visiting|Adjunct|Full)?\s*"
     r"(?:Professor|Lecturer|Instructor|Faculty Director|Director|Coordinator|Research Scientist)"
@@ -158,6 +245,9 @@ class UmdContact:
     personalization_context: str
     personalization_source: str
     personalization_confidence: str
+    fit_bucket: str
+    contact_type: str
+    campaign_name: str = ""
     status: str = "discovered"
     raw_text: str = ""
 
@@ -387,19 +477,54 @@ def _search_urls(query: str, max_results: int) -> list[str]:
     return urls
 
 
-def collect_candidate_urls(settings: Settings, limit: int | None = None) -> tuple[list[str], list[dict]]:
+def collect_candidate_urls(
+    settings: Settings,
+    limit: int | None = None,
+    search_depth: str = "standard",
+) -> tuple[list[str], list[dict]]:
     urls = []
     logs = []
     seen = set()
-    for url in SEED_URLS:
+    depth = (search_depth or "standard").lower()
+    seed_urls = SEED_URLS if depth == "standard" else EXPANDED_SEED_URLS
+    search_queries = SEARCH_QUERIES if depth == "standard" else [*SEARCH_QUERIES, *EXPANDED_SEARCH_QUERIES]
+    results_per_query = settings.umd_ta_ra_search_results_per_query
+    if depth in {"expanded", "aggressive"}:
+        results_per_query = max(results_per_query, 8)
+    if depth == "aggressive":
+        results_per_query = max(results_per_query, 12)
+
+    for url in seed_urls:
         if url not in seen:
             seen.add(url)
             urls.append(url)
         if limit and len(urls) >= limit:
             return urls[:limit], logs
-    for query in SEARCH_QUERIES:
+    if depth in {"expanded", "aggressive"}:
+        crawl_seed_cap = 8 if depth == "expanded" else 16
+        for seed_url in seed_urls[:crawl_seed_cap]:
+            try:
+                html = _request_url(seed_url, timeout=15)
+                found = _extract_links(html, seed_url)
+                preferred = [
+                    url
+                    for url in found
+                    if any(token in url.lower() for token in ("faculty", "people", "profile", "directory", "research", "course", "lab"))
+                ]
+                logs.append({"query": f"crawl:{seed_url}", "result_count": len(preferred), "status": "success"})
+                for url in preferred[:20]:
+                    if url not in seen:
+                        seen.add(url)
+                        urls.append(url)
+                    if limit and len(urls) >= limit:
+                        return urls[:limit], logs
+                time.sleep(max(settings.umd_ta_ra_request_delay_seconds, 0))
+            except Exception as exc:
+                logs.append({"query": f"crawl:{seed_url}", "result_count": 0, "status": "failed", "error": str(exc)})
+
+    for query in search_queries:
         try:
-            found = _search_urls(query, settings.umd_ta_ra_search_results_per_query)
+            found = _search_urls(query, results_per_query)
             logs.append({"query": query, "result_count": len(found), "status": "success"})
             for url in found:
                 if url not in seen:
@@ -454,6 +579,38 @@ def _infer_title(text: str) -> str:
         return "Research Scientist"
     if "instructor" in lower:
         return "Instructor"
+    return "Faculty/Staff"
+
+
+def fit_bucket(score: int) -> str:
+    if score >= 80:
+        return "High Fit"
+    if score >= 65:
+        return "Good Fit"
+    if score >= 50:
+        return "Medium Fit"
+    return "Low Fit"
+
+
+def _infer_contact_type(title: str, text: str = "") -> str:
+    haystack = f"{title} {text[:500]}".lower()
+    ordered = [
+        "Graduate Program Coordinator",
+        "Course Coordinator",
+        "Clinical Professor",
+        "Research Professor",
+        "Associate Professor",
+        "Assistant Professor",
+        "Lab Director",
+        "Program Director",
+        "Lecturer",
+        "Professor",
+    ]
+    for label in ordered:
+        if any(keyword in haystack for keyword in CONTACT_TYPE_KEYWORDS.get(label, ())):
+            return label
+    if "administrator" in haystack or "coordinator" in haystack:
+        return "Department administrator"
     return "Faculty/Staff"
 
 
@@ -545,27 +702,33 @@ def score_contact(contact: UmdContact) -> tuple[int, str]:
 
     skill_hits = [keyword for keyword in SKILL_KEYWORDS if keyword in text]
     if skill_hits:
-        score += min(30, 12 + len(skill_hits) * 3)
-        reasons.append(f"Matches skills/background: {', '.join(skill_hits[:5])}")
+        score += min(25, 10 + len(skill_hits) * 3)
+        reasons.append(f"Matches MSIS/data/background: {', '.join(skill_hits[:5])}")
 
     if contact.opportunity_type != "General":
         score += 20
-        reasons.append(f"Mentions {contact.opportunity_type} opportunity")
+        reasons.append(f"Mentions {contact.opportunity_type} or support opportunity")
 
-    if contact.department != "University of Maryland":
+    course_text = f"{contact.courses_taught} {contact.research_or_course_area}".lower()
+    if contact.courses_taught or any(token in course_text for token in ("course", "teaching", "syllabus", "analytics", "data", "python", "database", "statistics")):
         score += 15
-        reasons.append(f"Relevant UMD department: {contact.department}")
+        reasons.append("Relevant course or teaching signal")
+
+    research_text = f"{contact.research_interests} {contact.lab_name} {contact.research_or_course_area}".lower()
+    if any(keyword in research_text for keyword in SKILL_KEYWORDS):
+        score += 15
+        reasons.append("Research/course area aligns with analytics, AI, data, or business technology")
 
     if contact.email:
-        score += 15
+        score += 10
         reasons.append("UMD email available")
 
     if contact.semester in {"Summer 2026", "Fall 2026", "2026"} or any(token in text for token in ("current", "recent", "2025", "2026")):
         score += 10
         reasons.append("Current/recent or 2026-relevant page")
 
-    if contact.research_or_course_area and contact.research_or_course_area != "UMD course or research support":
-        score += 10
+    if contact.personalization_context or (contact.research_or_course_area and contact.research_or_course_area != "UMD course or research support"):
+        score += 5
         reasons.append("Personalization details available")
 
     return min(score, 100), "; ".join(reasons) or "General UMD contact with limited fit signals"
@@ -611,10 +774,13 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
             personalization_context="",
             personalization_source="Fallback",
             personalization_confidence="Low",
+            fit_bucket="Low Fit",
+            contact_type=_infer_contact_type(contact_title, text),
             status="discovered",
             raw_text=text[:5000],
         )
         contact.fit_score, contact.fit_reason = score_contact(contact)
+        contact.fit_bucket = fit_bucket(contact.fit_score)
         _apply_personalization(contact)
         contact.personalization_notes = _personalization_notes(contact)
         contact.status = "drafted" if contact.email and contact.fit_score >= 55 else "discovered"
@@ -642,10 +808,13 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
             personalization_context="",
             personalization_source="Fallback",
             personalization_confidence="Low",
+            fit_bucket="Low Fit",
+            contact_type=_infer_contact_type(title_guess, text),
             status="missing_email",
             raw_text=text[:5000],
         )
         contact.fit_score, contact.fit_reason = score_contact(contact)
+        contact.fit_bucket = fit_bucket(contact.fit_score)
         _apply_personalization(contact)
         contact.personalization_notes = _personalization_notes(contact)
         contacts.append(contact)
@@ -827,6 +996,40 @@ def _start_run(conn, run_type: str) -> int:
     return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
 
+def _start_discovery_run(
+    conn,
+    workflow_run_id: int,
+    search_depth: str,
+    target_contact_count: int,
+    max_contacts: int,
+) -> int:
+    now = utc_now_iso()
+    if db.is_postgres_connection(conn):
+        row = conn.execute(
+            """
+            INSERT INTO umd_ta_ra_discovery_runs (
+                workflow_run_id, started_at, status, search_depth, target_contact_count, max_contacts
+            )
+            VALUES (?, ?, 'running', ?, ?, ?)
+            RETURNING id
+            """,
+            (workflow_run_id, now, search_depth, target_contact_count, max_contacts),
+        ).fetchone()
+        conn.commit()
+        return int(row["id"])
+    conn.execute(
+        """
+        INSERT INTO umd_ta_ra_discovery_runs (
+            workflow_run_id, started_at, status, search_depth, target_contact_count, max_contacts
+        )
+        VALUES (?, ?, 'running', ?, ?, ?)
+        """,
+        (workflow_run_id, now, search_depth, target_contact_count, max_contacts),
+    )
+    conn.commit()
+    return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+
 def _log(conn, run_id: int, event_type: str, source_url: str = "", message: str = "") -> None:
     conn.execute(
         """
@@ -836,6 +1039,21 @@ def _log(conn, run_id: int, event_type: str, source_url: str = "", message: str 
         (run_id, event_type, source_url[:1000], message[:2000], utc_now_iso()),
     )
     conn.commit()
+
+
+def _current_quality_count(conn, min_score: int = 65) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM umd_ta_ra_contacts
+        WHERE fit_score >= ?
+          AND email_lower IS NOT NULL
+          AND email_lower != ''
+          AND status NOT IN ('sent', 'skipped', 'not_relevant')
+        """,
+        (min_score,),
+    ).fetchone()
+    return int(row["count"] or 0)
 
 
 def _find_existing_contact(conn, contact: UmdContact):
@@ -900,6 +1118,9 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 personalization_context = COALESCE(NULLIF(?, ''), personalization_context),
                 personalization_source = COALESCE(NULLIF(?, ''), personalization_source),
                 personalization_confidence = COALESCE(NULLIF(?, ''), personalization_confidence),
+                fit_bucket = COALESCE(NULLIF(?, ''), fit_bucket),
+                contact_type = COALESCE(NULLIF(?, ''), contact_type),
+                campaign_name = COALESCE(NULLIF(?, ''), campaign_name),
                 status = ?,
                 updated_at = ?,
                 raw_text = COALESCE(NULLIF(?, ''), raw_text),
@@ -927,6 +1148,9 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 contact.personalization_context,
                 contact.personalization_source,
                 contact.personalization_confidence,
+                contact.fit_bucket,
+                contact.contact_type,
+                contact.campaign_name,
                 status,
                 now,
                 contact.raw_text,
@@ -961,6 +1185,9 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
         contact.personalization_context,
         contact.personalization_source,
         contact.personalization_confidence,
+        contact.fit_bucket,
+        contact.contact_type,
+        contact.campaign_name,
         contact.status,
         now,
         now,
@@ -975,10 +1202,11 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 phone, office, research_interests, courses_taught, lab_name, profile_url, source_url,
                 research_or_course_area, opportunity_type, semester, fit_score,
                 fit_reason, personalization_notes, personalization_context,
-                personalization_source, personalization_confidence, status, discovered_at, updated_at,
+                personalization_source, personalization_confidence, fit_bucket, contact_type, campaign_name,
+                status, discovered_at, updated_at,
                 raw_text, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             params,
@@ -992,10 +1220,11 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 phone, office, research_interests, courses_taught, lab_name, profile_url, source_url,
                 research_or_course_area, opportunity_type, semester, fit_score,
                 fit_reason, personalization_notes, personalization_context,
-                personalization_source, personalization_confidence, status, discovered_at, updated_at,
+                personalization_source, personalization_confidence, fit_bucket, contact_type, campaign_name,
+                status, discovered_at, updated_at,
                 raw_text, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             params,
         )
@@ -1106,7 +1335,16 @@ def create_or_update_draft(conn, contact_id: int, contact: UmdContact, settings:
     return draft_id
 
 
-def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str, int]:
+def run_discovery(
+    settings: Settings,
+    max_pages: int | None = None,
+    target_contacts: int | None = None,
+    max_contacts: int | None = None,
+    search_depth: str = "standard",
+    departments: Iterable[str] | None = None,
+    opportunity_types: Iterable[str] | None = None,
+    min_score: int | None = None,
+) -> dict[str, int]:
     """Search UMD pages, store contacts, and draft reviewable emails.
 
     This does not send email. It only writes to umd_ta_ra_* tables.
@@ -1114,22 +1352,44 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
 
     counts = {
         "pages_searched": 0,
+        "sources_searched": 0,
         "contacts_discovered": 0,
         "high_fit_contacts": 0,
+        "good_fit_contacts": 0,
+        "medium_fit_contacts": 0,
+        "low_fit_contacts": 0,
         "emails_drafted": 0,
         "duplicates_removed": 0,
         "missing_emails": 0,
         "failed_scrapes": 0,
     }
+    search_depth = (search_depth or "standard").lower()
+    target_contacts = int(target_contacts or settings.umd_ta_ra_target_contacts)
+    max_contacts = int(max_contacts or settings.umd_ta_ra_max_contacts)
+    min_score = int(min_score if min_score is not None else min(settings.umd_ta_ra_min_fit_score, 50))
+    department_set = {item for item in (departments or []) if item}
+    opportunity_set = {item for item in (opportunity_types or []) if item}
+    safe_page_limit = max_pages or min(
+        max(settings.umd_ta_ra_max_pages, target_contacts * (3 if search_depth == "aggressive" else 2)),
+        240 if search_depth == "aggressive" else 180,
+    )
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         run_id = _start_run(conn, "discovery")
+        discovery_run_id = _start_discovery_run(conn, run_id, search_depth, target_contacts, max_contacts)
         try:
-            urls, search_logs = collect_candidate_urls(settings, limit=max_pages or settings.umd_ta_ra_max_pages)
+            urls, search_logs = collect_candidate_urls(settings, limit=safe_page_limit, search_depth=search_depth)
+            counts["sources_searched"] = len(urls)
             for item in search_logs:
                 _log(conn, run_id, "search", "", json.dumps(item, sort_keys=True))
 
             for url in urls:
+                if _current_quality_count(conn, 65) >= target_contacts:
+                    _log(conn, run_id, "target_reached", url, f"Reached target of {target_contacts} Good/High Fit UMD contacts")
+                    break
+                if counts["contacts_discovered"] >= max_contacts:
+                    _log(conn, run_id, "max_contacts_reached", url, f"Reached max new contacts cap of {max_contacts}")
+                    break
                 time.sleep(max(settings.umd_ta_ra_request_delay_seconds, 0))
                 try:
                     html = _request_url(url)
@@ -1141,7 +1401,13 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
                     if not page_contacts:
                         _log(conn, run_id, "no_contacts", url, "No relevant UMD contact found on page")
                     for contact in page_contacts:
-                        if contact.fit_score < settings.umd_ta_ra_min_fit_score and contact.opportunity_type == "General":
+                        if department_set and contact.department not in department_set:
+                            _log(conn, run_id, "department_filtered", url, f"Skipped {contact.email or contact.name}: {contact.department}")
+                            continue
+                        if opportunity_set and contact.opportunity_type not in opportunity_set:
+                            _log(conn, run_id, "opportunity_filtered", url, f"Skipped {contact.email or contact.name}: {contact.opportunity_type}")
+                            continue
+                        if contact.fit_score < min_score:
                             _log(conn, run_id, "low_fit", url, f"Skipped low-fit contact candidate: {contact.fit_score}")
                             continue
                         contact_id, was_duplicate = upsert_contact(conn, contact)
@@ -1149,11 +1415,18 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
                             counts["duplicates_removed"] += 1
                         else:
                             counts["contacts_discovered"] += 1
-                        if contact.fit_score >= settings.umd_ta_ra_high_fit_score:
+                        bucket = fit_bucket(contact.fit_score)
+                        if bucket == "High Fit":
                             counts["high_fit_contacts"] += 1
+                        elif bucket == "Good Fit":
+                            counts["good_fit_contacts"] += 1
+                        elif bucket == "Medium Fit":
+                            counts["medium_fit_contacts"] += 1
+                        else:
+                            counts["low_fit_contacts"] += 1
                         if not contact.email:
                             counts["missing_emails"] += 1
-                        elif contact.fit_score >= settings.umd_ta_ra_min_fit_score:
+                        elif contact.fit_score >= min_score:
                             create_or_update_draft(conn, contact_id, contact, settings)
                             counts["emails_drafted"] += 1
                 except Exception as exc:
@@ -1177,8 +1450,46 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
                     counts["emails_drafted"],
                     counts["duplicates_removed"],
                     counts["missing_emails"],
-                    json.dumps({"search_logs": search_logs}, sort_keys=True),
+                    json.dumps(
+                        {
+                            "search_logs": search_logs,
+                            "search_depth": search_depth,
+                            "target_contacts": target_contacts,
+                            "max_contacts": max_contacts,
+                            "good_fit_contacts": counts["good_fit_contacts"],
+                            "medium_fit_contacts": counts["medium_fit_contacts"],
+                            "low_fit_contacts": counts["low_fit_contacts"],
+                            "sources_searched": counts["sources_searched"],
+                        },
+                        sort_keys=True,
+                    ),
                     run_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE umd_ta_ra_discovery_runs
+                SET completed_at = ?, status = 'success', pages_searched = ?, sources_searched = ?,
+                    contacts_discovered = ?, high_fit_contacts = ?, good_fit_contacts = ?,
+                    medium_fit_contacts = ?, low_fit_contacts = ?, emails_drafted = ?,
+                    duplicates_removed = ?, missing_emails = ?, failed_pages = ?, details_json = ?
+                WHERE id = ?
+                """,
+                (
+                    utc_now_iso(),
+                    counts["pages_searched"],
+                    counts["sources_searched"],
+                    counts["contacts_discovered"],
+                    counts["high_fit_contacts"],
+                    counts["good_fit_contacts"],
+                    counts["medium_fit_contacts"],
+                    counts["low_fit_contacts"],
+                    counts["emails_drafted"],
+                    counts["duplicates_removed"],
+                    counts["missing_emails"],
+                    counts["failed_scrapes"],
+                    json.dumps({"search_logs": search_logs}, sort_keys=True),
+                    discovery_run_id,
                 ),
             )
             conn.commit()
@@ -1190,6 +1501,14 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
                 WHERE id = ?
                 """,
                 (utc_now_iso(), str(exc)[:2000], run_id),
+            )
+            conn.execute(
+                """
+                UPDATE umd_ta_ra_discovery_runs
+                SET completed_at = ?, status = 'failed', error_summary = ?
+                WHERE id = ?
+                """,
+                (utc_now_iso(), str(exc)[:2000], discovery_run_id),
             )
             conn.commit()
             raise
@@ -1218,6 +1537,9 @@ def _contact_from_row(row) -> UmdContact:
         personalization_context=row["personalization_context"] or "",
         personalization_source=row["personalization_source"] or "Fallback",
         personalization_confidence=row["personalization_confidence"] or "Low",
+        fit_bucket=row["fit_bucket"] or fit_bucket(int(row["fit_score"] or 0)),
+        contact_type=row["contact_type"] or _infer_contact_type(row["title"] or "", row["raw_text"] or ""),
+        campaign_name=row["campaign_name"] or "",
         status=row["status"] or "discovered",
         raw_text=row["raw_text"] or "",
     )
@@ -1350,6 +1672,452 @@ def mark_contact_status(settings: Settings, contact_id: int, status: str, note: 
                 (status, now, contact_id),
             )
         conn.commit()
+
+
+def bulk_generate_drafts(settings: Settings, contact_ids: Iterable[int] | None = None, min_score: int = 65) -> dict[str, int]:
+    counts = {"drafted": 0, "needs_review": 0, "skipped": 0}
+    ids = [int(item) for item in (contact_ids or [])]
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(f"SELECT * FROM umd_ta_ra_contacts WHERE id IN ({placeholders})", tuple(ids)).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM umd_ta_ra_contacts
+                WHERE fit_score >= ?
+                  AND email_lower IS NOT NULL
+                  AND email_lower != ''
+                  AND status NOT IN ('sent', 'skipped', 'not_relevant')
+                ORDER BY fit_score DESC, updated_at DESC
+                """,
+                (min_score,),
+            ).fetchall()
+        for row in rows:
+            if row["last_contacted_at"] and row["status"] != "follow_up_needed":
+                counts["skipped"] += 1
+                continue
+            contact = _contact_from_row(row)
+            draft_id = create_or_update_draft(conn, int(row["id"]), contact, settings)
+            draft = conn.execute("SELECT status FROM umd_ta_ra_email_drafts WHERE id = ?", (draft_id,)).fetchone()
+            if draft and draft["status"] == "needs_review":
+                counts["needs_review"] += 1
+            else:
+                counts["drafted"] += 1
+    return counts
+
+
+def bulk_approve_contacts(
+    settings: Settings,
+    contact_ids: Iterable[int] | None = None,
+    min_score: int = 65,
+    include_buckets: Iterable[str] | None = None,
+) -> dict[str, int]:
+    counts = {"approved": 0, "needs_review": 0, "skipped": 0}
+    buckets = tuple(include_buckets or ("High Fit", "Good Fit"))
+    ids = [int(item) for item in (contact_ids or [])]
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(f"SELECT id FROM umd_ta_ra_contacts WHERE id IN ({placeholders})", tuple(ids)).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in buckets)
+            rows = conn.execute(
+                f"""
+                SELECT id
+                FROM umd_ta_ra_contacts
+                WHERE fit_score >= ?
+                  AND fit_bucket IN ({placeholders})
+                  AND email_lower IS NOT NULL
+                  AND email_lower != ''
+                  AND status NOT IN ('sent', 'skipped', 'not_relevant')
+                ORDER BY fit_score DESC, updated_at DESC
+                """,
+                (min_score, *buckets),
+            ).fetchall()
+    for row in rows:
+        contact_id = int(row["id"])
+        try:
+            regenerate_clean_draft(settings, contact_id)
+            approved, issues = approve_draft(settings, contact_id)
+            if approved:
+                counts["approved"] += 1
+            else:
+                counts["needs_review"] += 1
+        except Exception:
+            logger.exception("Bulk UMD approval failed for contact %s", contact_id)
+            counts["skipped"] += 1
+    return counts
+
+
+def create_campaign(
+    settings: Settings,
+    campaign_name: str,
+    semester_target: str = "Both",
+    contact_ids: Iterable[int] | None = None,
+    min_score: int = 65,
+    target_contact_count: int | None = None,
+    max_emails: int | None = None,
+    min_delay_seconds: int | None = None,
+    max_delay_seconds: int | None = None,
+    daily_send_limit: int | None = None,
+) -> tuple[int, dict[str, int]]:
+    now = utc_now_iso()
+    target_contact_count = int(target_contact_count or settings.umd_ta_ra_target_contacts)
+    max_emails = int(max_emails or settings.umd_ta_ra_max_contacts)
+    min_delay_seconds = int(min_delay_seconds or settings.umd_ta_ra_min_send_delay_seconds)
+    max_delay_seconds = int(max_delay_seconds or settings.umd_ta_ra_max_send_delay_seconds)
+    daily_send_limit = int(daily_send_limit or settings.umd_ta_ra_default_daily_limit)
+    contact_ids_provided = contact_ids is not None
+    selected_ids = [int(item) for item in (contact_ids or [])]
+    counts = {"selected": 0, "approved": 0, "skipped": 0}
+
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        if db.is_postgres_connection(conn):
+            row = conn.execute(
+                """
+                INSERT INTO umd_ta_ra_campaigns (
+                    campaign_name, semester_target, target_contact_count, status,
+                    min_delay_seconds, max_delay_seconds, daily_send_limit, max_emails,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    campaign_name,
+                    semester_target,
+                    target_contact_count,
+                    min_delay_seconds,
+                    max_delay_seconds,
+                    daily_send_limit,
+                    max_emails,
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            campaign_id = int(row["id"])
+        else:
+            conn.execute(
+                """
+                INSERT INTO umd_ta_ra_campaigns (
+                    campaign_name, semester_target, target_contact_count, status,
+                    min_delay_seconds, max_delay_seconds, daily_send_limit, max_emails,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    campaign_name,
+                    semester_target,
+                    target_contact_count,
+                    min_delay_seconds,
+                    max_delay_seconds,
+                    daily_send_limit,
+                    max_emails,
+                    now,
+                    now,
+                ),
+            )
+            campaign_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+        if contact_ids_provided:
+            if not selected_ids:
+                rows = []
+            else:
+                placeholders = ",".join("?" for _ in selected_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT c.id AS contact_id, d.id AS draft_id, d.status AS draft_status
+                    FROM umd_ta_ra_contacts c
+                    JOIN umd_ta_ra_email_drafts d ON d.id = c.email_draft_id
+                    WHERE c.id IN ({placeholders})
+                      AND c.fit_score >= ?
+                    ORDER BY c.fit_score DESC, c.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (*selected_ids, min_score, max_emails),
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT c.id AS contact_id, d.id AS draft_id, d.status AS draft_status
+                FROM umd_ta_ra_contacts c
+                JOIN umd_ta_ra_email_drafts d ON d.id = c.email_draft_id
+                WHERE c.fit_score >= ?
+                  AND c.fit_bucket IN ('High Fit', 'Good Fit')
+                  AND c.email_lower IS NOT NULL
+                  AND c.email_lower != ''
+                  AND c.status = 'approved'
+                  AND d.status = 'approved'
+                  AND COALESCE(c.last_contacted_at, '') = ''
+                ORDER BY c.fit_score DESC, d.approved_at ASC
+                LIMIT ?
+                """,
+                (min_score, max_emails),
+            ).fetchall()
+
+        for row in rows:
+            if row["draft_status"] != "approved":
+                counts["skipped"] += 1
+                continue
+            conn.execute(
+                """
+                INSERT INTO umd_ta_ra_campaign_recipients (
+                    campaign_id, contact_id, draft_id, send_status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (campaign_id, row["contact_id"], row["draft_id"], now, now),
+            )
+            counts["selected"] += 1
+            counts["approved"] += 1
+
+        conn.execute(
+            """
+            UPDATE umd_ta_ra_campaigns
+            SET selected_contacts_count = ?, approved_drafts_count = ?,
+                skipped_count = ?, status = CASE WHEN ? > 0 THEN 'ready' ELSE 'draft' END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (counts["selected"], counts["approved"], counts["skipped"], counts["approved"], now, campaign_id),
+        )
+        conn.commit()
+    return campaign_id, counts
+
+
+def set_campaign_status(settings: Settings, campaign_id: int, status: str) -> None:
+    if status not in {"draft", "ready", "sending", "paused", "completed", "stopped"}:
+        raise ValueError(f"Unsupported UMD campaign status: {status}")
+    now = utc_now_iso()
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        completed_at = now if status in {"completed", "stopped"} else ""
+        conn.execute(
+            """
+            UPDATE umd_ta_ra_campaigns
+            SET status = ?, updated_at = ?,
+                completed_at = CASE WHEN ? != '' THEN ? ELSE completed_at END
+            WHERE id = ?
+            """,
+            (status, now, completed_at, completed_at, campaign_id),
+        )
+        conn.commit()
+
+
+def _has_prior_umd_send(conn, contact_id: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM umd_ta_ra_contact_history
+        WHERE contact_id = ?
+          AND event_type = 'sent'
+        LIMIT 1
+        """,
+        (contact_id,),
+    ).fetchone()
+    return bool(row)
+
+
+def run_campaign_send(
+    settings: Settings,
+    campaign_id: int,
+    dry_run: bool = True,
+    min_delay_seconds: int | None = None,
+    max_delay_seconds: int | None = None,
+    daily_send_limit: int | None = None,
+    max_emails: int | None = None,
+    sleep_between: bool = False,
+) -> dict:
+    counts = {"sent": 0, "failed": 0, "skipped": 0, "dry_run": 0, "paused": 0, "schedule": []}
+    validate_sender_settings(settings)
+    validate_resume_attachment(settings)
+    gmail = None if dry_run else GmailClient(settings)
+    attachment_paths = [settings.resume_file] if settings.attach_resume else []
+    if not attachment_paths:
+        raise ValueError("Resume attachment is required for UMD campaign sending.")
+
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        campaign = conn.execute("SELECT * FROM umd_ta_ra_campaigns WHERE id = ? LIMIT 1", (campaign_id,)).fetchone()
+        if not campaign:
+            raise ValueError(f"UMD campaign {campaign_id} was not found.")
+        min_delay_seconds = int(min_delay_seconds or campaign["min_delay_seconds"] or settings.umd_ta_ra_min_send_delay_seconds)
+        max_delay_seconds = int(max_delay_seconds or campaign["max_delay_seconds"] or settings.umd_ta_ra_max_send_delay_seconds)
+        daily_send_limit = int(daily_send_limit or campaign["daily_send_limit"] or settings.umd_ta_ra_default_daily_limit)
+        max_emails = int(max_emails or campaign["max_emails"] or settings.umd_ta_ra_max_contacts)
+        if min_delay_seconds > max_delay_seconds:
+            min_delay_seconds, max_delay_seconds = max_delay_seconds, min_delay_seconds
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE umd_ta_ra_campaigns
+            SET status = ?, started_at = COALESCE(NULLIF(started_at, ''), ?), updated_at = ?
+            WHERE id = ?
+            """,
+            ("ready" if dry_run else "sending", now, now, campaign_id),
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            """
+            SELECT r.id AS recipient_id, r.retry_count, c.*, d.id AS draft_id, d.subject, d.body
+            FROM umd_ta_ra_campaign_recipients r
+            JOIN umd_ta_ra_contacts c ON c.id = r.contact_id
+            JOIN umd_ta_ra_email_drafts d ON d.id = r.draft_id
+            WHERE r.campaign_id = ?
+              AND r.send_status IN ('pending', 'failed', 'paused')
+              AND c.status = 'approved'
+              AND d.status = 'approved'
+            ORDER BY c.fit_score DESC, r.id ASC
+            LIMIT ?
+            """,
+            (campaign_id, min(daily_send_limit, max_emails)),
+        ).fetchall()
+
+        next_time = datetime.now()
+        for index, row in enumerate(rows):
+            current_campaign = conn.execute("SELECT status FROM umd_ta_ra_campaigns WHERE id = ?", (campaign_id,)).fetchone()
+            if current_campaign and current_campaign["status"] in {"paused", "stopped"}:
+                counts["paused"] += 1
+                break
+            delay = random.randint(min_delay_seconds, max_delay_seconds)
+            if index > 0:
+                next_time += timedelta(seconds=delay)
+            scheduled = next_time.isoformat(timespec="seconds")
+
+            validation_status, validation_issues = validate_umd_draft(row["subject"], row["body"], settings)
+            skip_reason = ""
+            if validation_issues:
+                skip_reason = "; ".join(validation_issues)
+            elif row["last_contacted_at"] and row["status"] != "follow_up_needed":
+                skip_reason = "Contact was already emailed or marked contacted."
+            elif _has_prior_umd_send(conn, int(row["id"])):
+                skip_reason = "Contact history shows a previous UMD email send."
+
+            if skip_reason:
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_campaign_recipients
+                    SET send_status = 'skipped', scheduled_send_time = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (scheduled, skip_reason[:1000], utc_now_iso(), row["recipient_id"]),
+                )
+                _log(conn, campaign_id, "campaign_skipped", row["source_url"], skip_reason)
+                counts["skipped"] += 1
+                continue
+
+            counts["schedule"].append({"email": row["email"], "name": row["name"], "scheduled_send_time": scheduled, "delay_seconds": delay})
+            if dry_run:
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_campaign_recipients
+                    SET send_status = 'pending', scheduled_send_time = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (scheduled, f"Dry-run only. Simulated delay: {delay} seconds.", utc_now_iso(), row["recipient_id"]),
+                )
+                _log(conn, campaign_id, "campaign_dry_run", row["source_url"], f"Would send to {row['email']} after {delay} seconds")
+                counts["dry_run"] += 1
+                continue
+
+            if not settings.umd_ta_ra_send_enabled:
+                raise ValueError("UMD_TA_RA_SEND_ENABLED is false. Enable it before live UMD campaign sends.")
+            if sleep_between and index > 0:
+                time.sleep(delay)
+            try:
+                message_id = gmail.send_email(row["email"], row["subject"], row["body"], attachment_paths=attachment_paths)
+                sent_at = utc_now_iso()
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_campaign_recipients
+                    SET send_status = 'sent', scheduled_send_time = ?, actual_send_time = ?,
+                        error_message = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (scheduled, sent_at, sent_at, row["recipient_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_email_drafts
+                    SET status = 'sent', sent_at = ?, gmail_message_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (sent_at, message_id, sent_at, row["draft_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_contacts
+                    SET status = 'sent', last_contacted_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (sent_at, sent_at, row["id"]),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO umd_ta_ra_contact_history (
+                        contact_id, campaign_id, event_type, email_status, campaign_name, event_at, notes
+                    )
+                    VALUES (?, ?, 'sent', 'sent', ?, ?, ?)
+                    """,
+                    (row["id"], campaign_id, campaign["campaign_name"], sent_at, message_id),
+                )
+                counts["sent"] += 1
+            except Exception as exc:
+                message = str(exc)
+                failed_at = utc_now_iso()
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_campaign_recipients
+                    SET send_status = 'failed', error_message = ?, retry_count = retry_count + 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (message[:1000], failed_at, row["recipient_id"]),
+                )
+                conn.execute(
+                    "UPDATE umd_ta_ra_email_drafts SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?",
+                    (message[:1000], failed_at, row["draft_id"]),
+                )
+                _log(conn, campaign_id, "campaign_send_failed", row["source_url"], message)
+                counts["failed"] += 1
+                if any(token in message.lower() for token in ("rate", "quota", "429", "too many requests", "throttle")):
+                    conn.execute("UPDATE umd_ta_ra_campaigns SET status = 'paused', updated_at = ? WHERE id = ?", (failed_at, campaign_id))
+                    counts["paused"] += 1
+                    break
+
+        status = "ready" if dry_run else "completed"
+        if counts["paused"]:
+            status = "paused"
+        conn.execute(
+            """
+            UPDATE umd_ta_ra_campaigns
+            SET sent_count = sent_count + ?, failed_count = failed_count + ?,
+                skipped_count = skipped_count + ?, dry_run_count = dry_run_count + ?,
+                status = ?, updated_at = ?, completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
+                details_json = ?
+            WHERE id = ?
+            """,
+            (
+                counts["sent"],
+                counts["failed"],
+                counts["skipped"],
+                counts["dry_run"],
+                status,
+                utc_now_iso(),
+                status,
+                utc_now_iso(),
+                json.dumps({"last_run": counts}, sort_keys=True),
+                campaign_id,
+            ),
+        )
+        conn.commit()
+    return counts
 
 
 def send_approved_drafts(settings: Settings, limit: int = 5, dry_run: bool = True) -> dict[str, int]:

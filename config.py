@@ -90,6 +90,11 @@ class Settings:
     umd_ta_ra_min_fit_score: int
     umd_ta_ra_high_fit_score: int
     umd_ta_ra_send_enabled: bool
+    umd_ta_ra_target_contacts: int
+    umd_ta_ra_max_contacts: int
+    umd_ta_ra_default_daily_limit: int
+    umd_ta_ra_min_send_delay_seconds: int
+    umd_ta_ra_max_send_delay_seconds: int
 
     gmail_credentials_file: Path
     gmail_token_file: Path
@@ -180,6 +185,11 @@ def load_settings() -> Settings:
         umd_ta_ra_min_fit_score=_get_int("UMD_TA_RA_MIN_FIT_SCORE", 55),
         umd_ta_ra_high_fit_score=_get_int("UMD_TA_RA_HIGH_FIT_SCORE", 70),
         umd_ta_ra_send_enabled=_get_bool("UMD_TA_RA_SEND_ENABLED", False),
+        umd_ta_ra_target_contacts=_get_int("UMD_TA_RA_TARGET_CONTACTS", 75),
+        umd_ta_ra_max_contacts=_get_int("UMD_TA_RA_MAX_CONTACTS", 100),
+        umd_ta_ra_default_daily_limit=_get_int("UMD_TA_RA_DEFAULT_DAILY_LIMIT", 40),
+        umd_ta_ra_min_send_delay_seconds=_get_int("UMD_TA_RA_MIN_SEND_DELAY_SECONDS", 90),
+        umd_ta_ra_max_send_delay_seconds=_get_int("UMD_TA_RA_MAX_SEND_DELAY_SECONDS", 240),
         gmail_credentials_file=_path_from_env("GMAIL_CREDENTIALS_FILE", "credentials.json"),
         gmail_token_file=_path_from_env("GMAIL_TOKEN_FILE", "token.json"),
         sender_name=_get_str("SENDER_NAME"),

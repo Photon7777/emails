@@ -282,6 +282,9 @@ def load_umd_ta_ra_contacts() -> pd.DataFrame:
             c.personalization_context,
             c.personalization_source,
             c.personalization_confidence,
+            c.fit_bucket,
+            c.contact_type,
+            c.campaign_name,
             c.status,
             c.discovered_at,
             c.updated_at,
@@ -323,6 +326,41 @@ def load_umd_ta_ra_logs() -> pd.DataFrame:
         ORDER BY created_at DESC, id DESC
         LIMIT 300
         """
+    )
+
+
+@st.cache_data(ttl=20)
+def load_umd_ta_ra_campaigns() -> pd.DataFrame:
+    return read_sql(
+        """
+        SELECT *
+        FROM umd_ta_ra_campaigns
+        ORDER BY created_at DESC, id DESC
+        LIMIT 100
+        """
+    )
+
+
+@st.cache_data(ttl=20)
+def load_umd_ta_ra_campaign_recipients(campaign_id: int) -> pd.DataFrame:
+    return read_sql(
+        """
+        SELECT
+            r.*,
+            c.name,
+            c.email,
+            c.title,
+            c.department,
+            c.fit_score,
+            c.fit_bucket,
+            d.subject
+        FROM umd_ta_ra_campaign_recipients r
+        JOIN umd_ta_ra_contacts c ON c.id = r.contact_id
+        JOIN umd_ta_ra_email_drafts d ON d.id = r.draft_id
+        WHERE r.campaign_id = ?
+        ORDER BY r.id ASC
+        """,
+        (campaign_id,),
     )
 
 
@@ -441,6 +479,12 @@ def status_badge(status: str) -> str:
         "drafted": "#2563eb",
         "needs_review": "#f59e0b",
         "approved": "#0f766e",
+        "ready": "#0f766e",
+        "sending": "#2563eb",
+        "paused": "#f59e0b",
+        "completed": "#16a34a",
+        "stopped": "#64748b",
+        "pending": "#475569",
         "queued": "#0f766e",
         "sent": "#16a34a",
         "contacted": "#16a34a",
@@ -1328,12 +1372,21 @@ def umd_ta_ra_outreach_page() -> None:
     contacts = load_umd_ta_ra_contacts()
     runs = load_umd_ta_ra_runs()
     logs = load_umd_ta_ra_logs()
+    campaigns = load_umd_ta_ra_campaigns()
 
     latest_run = runs.iloc[0] if not runs.empty else None
     approved_count = int((contacts["status"] == "approved").sum()) if not contacts.empty else 0
     sent_count = int((contacts["status"] == "sent").sum()) if not contacts.empty else 0
     drafted_count = int(contacts["draft_status"].fillna("").isin(["drafted", "approved", "sent"]).sum()) if not contacts.empty else 0
-    high_fit_count = int((contacts["fit_score"].fillna(0).astype(int) >= settings.umd_ta_ra_high_fit_score).sum()) if not contacts.empty else 0
+    if not contacts.empty:
+        contacts["fit_score"] = contacts["fit_score"].fillna(0).astype(int)
+        high_fit_count = int((contacts["fit_bucket"] == "High Fit").sum())
+        good_fit_count = int((contacts["fit_bucket"] == "Good Fit").sum())
+        medium_fit_count = int((contacts["fit_bucket"] == "Medium Fit").sum())
+        low_fit_count = int((contacts["fit_bucket"] == "Low Fit").sum())
+        missing_email_count = int((contacts["email"].fillna("").str.len() == 0).sum())
+    else:
+        high_fit_count = good_fit_count = medium_fit_count = low_fit_count = missing_email_count = 0
 
     cols = st.columns(6)
     with cols[0]:
@@ -1349,14 +1402,51 @@ def umd_ta_ra_outreach_page() -> None:
     with cols[5]:
         metric_card("Emails Sent", sent_count)
 
-    with st.expander("Run UMD discovery manually", expanded=contacts.empty):
-        max_pages = st.number_input("Maximum pages to search this run", min_value=1, max_value=100, value=min(settings.umd_ta_ra_max_pages, 30))
+    summary_cols = st.columns(6)
+    with summary_cols[0]:
+        metric_card("Good Fit", good_fit_count)
+    with summary_cols[1]:
+        metric_card("Medium Fit", medium_fit_count)
+    with summary_cols[2]:
+        metric_card("Low Fit", low_fit_count)
+    with summary_cols[3]:
+        metric_card("Missing Emails", missing_email_count)
+    with summary_cols[4]:
+        metric_card("Campaigns", 0 if campaigns.empty else len(campaigns))
+    with summary_cols[5]:
+        metric_card("Resume", "Ready" if settings.attach_resume else "Off")
+
+    with st.expander("Discovery Controls", expanded=contacts.empty):
+        control_cols = st.columns(3)
+        with control_cols[0]:
+            target_contacts = st.number_input("Target number of contacts", min_value=10, max_value=200, value=settings.umd_ta_ra_target_contacts)
+            max_contacts = st.number_input("Max contacts to add", min_value=10, max_value=250, value=settings.umd_ta_ra_max_contacts)
+            max_pages = st.number_input("Safe page/search limit", min_value=1, max_value=250, value=min(max(settings.umd_ta_ra_max_pages, settings.umd_ta_ra_target_contacts * 2), 180))
+        with control_cols[1]:
+            min_discovery_score = st.slider("Fit score threshold", 0, 100, 50)
+            search_depth = st.selectbox("Search depth", ["standard", "expanded", "aggressive"], index=1)
+        with control_cols[2]:
+            department_options = sorted(contacts["department"].dropna().unique().tolist()) if not contacts.empty else []
+            selected_departments = st.multiselect("Departments to include", department_options)
+            opportunity_options = ["TA", "RA", "Grader", "Course Support", "Faculty Assistant", "General"]
+            selected_opportunities = st.multiselect("Opportunity types to include", opportunity_options)
         st.caption("Discovery is read-only against UMD/public search pages and drafts emails for review. It does not send.")
         if st.button("Run UMD TA/RA Discovery", type="primary"):
             with st.spinner("Searching UMD pages and drafting reviewable emails..."):
                 try:
-                    counts = umd_ta_ra_workflow.run_discovery(settings, max_pages=int(max_pages))
+                    counts = umd_ta_ra_workflow.run_discovery(
+                        settings,
+                        max_pages=int(max_pages),
+                        target_contacts=int(target_contacts),
+                        max_contacts=int(max_contacts),
+                        search_depth=search_depth,
+                        departments=selected_departments,
+                        opportunity_types=selected_opportunities,
+                        min_score=int(min_discovery_score),
+                    )
                     st.success(f"Discovery finished: {counts}")
+                    if int(counts.get("high_fit_contacts", 0)) + int(counts.get("good_fit_contacts", 0)) < 50:
+                        st.warning("Fewer than 50 Good/High Fit contacts were found. Try expanded/aggressive search or a lower score threshold.")
                     st.cache_data.clear()
                     st.rerun()
                 except Exception as exc:
@@ -1398,6 +1488,7 @@ def umd_ta_ra_outreach_page() -> None:
             "id",
             "name",
             "title",
+            "contact_type",
             "department",
             "email",
             "opportunity_type",
@@ -1408,8 +1499,10 @@ def umd_ta_ra_outreach_page() -> None:
             "validation_status",
             "research_or_course_area",
             "fit_score",
+            "fit_bucket",
             "source_url",
             "status",
+            "last_contacted_at",
             "draft_status",
             "updated_at",
         ]
@@ -1417,6 +1510,7 @@ def umd_ta_ra_outreach_page() -> None:
         columns={
             "name": "Name",
             "title": "Title",
+            "contact_type": "Contact type",
             "department": "Department",
             "email": "Email",
             "opportunity_type": "Opportunity type",
@@ -1427,13 +1521,77 @@ def umd_ta_ra_outreach_page() -> None:
             "validation_status": "Validation",
             "research_or_course_area": "Course or research area",
             "fit_score": "Fit score",
+            "fit_bucket": "Fit bucket",
             "source_url": "Source URL",
             "status": "Status",
+            "last_contacted_at": "Last contacted date",
             "draft_status": "Draft status",
             "updated_at": "Last updated",
         }
     )
     st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.subheader("Bulk Draft and Approval")
+    selectable_bulk = filtered[filtered["email"].fillna("").str.len() > 0].copy()
+    selected_bulk_ids = []
+    if selectable_bulk.empty:
+        st.info("No filtered contacts with email addresses are available for bulk actions.")
+    else:
+        bulk_options = selectable_bulk["id"].tolist()
+        selected_bulk_ids = st.multiselect(
+            "Select contacts for bulk actions",
+            bulk_options,
+            format_func=lambda value: (
+                f"{selectable_bulk.loc[selectable_bulk['id'] == value, 'name'].iloc[0]} | "
+                f"{selectable_bulk.loc[selectable_bulk['id'] == value, 'fit_bucket'].iloc[0]} | "
+                f"{int(selectable_bulk.loc[selectable_bulk['id'] == value, 'fit_score'].iloc[0])}"
+            ),
+        )
+        bulk_cols = st.columns(4)
+        with bulk_cols[0]:
+            if st.button("Generate drafts for selected"):
+                counts = umd_ta_ra_workflow.bulk_generate_drafts(settings, selected_bulk_ids)
+                st.success(f"Draft generation finished: {counts}")
+                st.cache_data.clear()
+                st.rerun()
+        with bulk_cols[1]:
+            if st.button("Generate High Fit drafts"):
+                high_ids = filtered[filtered["fit_bucket"] == "High Fit"]["id"].tolist()
+                counts = umd_ta_ra_workflow.bulk_generate_drafts(settings, high_ids)
+                st.success(f"High Fit draft generation finished: {counts}")
+                st.cache_data.clear()
+                st.rerun()
+        with bulk_cols[2]:
+            if st.button("Generate High + Good drafts"):
+                high_good_ids = filtered[filtered["fit_bucket"].isin(["High Fit", "Good Fit"])]["id"].tolist()
+                counts = umd_ta_ra_workflow.bulk_generate_drafts(settings, high_good_ids)
+                st.success(f"High + Good draft generation finished: {counts}")
+                st.cache_data.clear()
+                st.rerun()
+        with bulk_cols[3]:
+            if st.button("Mark selected skipped"):
+                for contact_id in selected_bulk_ids:
+                    umd_ta_ra_workflow.mark_contact_status(settings, int(contact_id), "skipped", "Skipped from UMD TA/RA bulk action")
+                st.success(f"Skipped {len(selected_bulk_ids)} selected contact(s).")
+                st.cache_data.clear()
+                st.rerun()
+
+        st.write("Bulk approval")
+        approval_threshold = st.slider("Approve drafts with fit score at least", 0, 100, 65)
+        reviewed = st.checkbox("I reviewed the selected contacts and approve these drafts for sending.")
+        approve_cols = st.columns(2)
+        with approve_cols[0]:
+            if st.button("Approve selected drafts", disabled=not reviewed):
+                counts = umd_ta_ra_workflow.bulk_approve_contacts(settings, selected_bulk_ids, min_score=int(approval_threshold), include_buckets=("High Fit", "Good Fit", "Medium Fit"))
+                st.success(f"Bulk approval finished: {counts}")
+                st.cache_data.clear()
+                st.rerun()
+        with approve_cols[1]:
+            if st.button("Approve all High + Good drafts", disabled=not reviewed):
+                counts = umd_ta_ra_workflow.bulk_approve_contacts(settings, None, min_score=int(approval_threshold), include_buckets=("High Fit", "Good Fit"))
+                st.success(f"Bulk approval finished: {counts}")
+                st.cache_data.clear()
+                st.rerun()
 
     st.subheader("Email Preview and Review")
     selectable = filtered[filtered["email"].fillna("").str.len() > 0].copy()
@@ -1531,21 +1689,159 @@ def umd_ta_ra_outreach_page() -> None:
                 st.cache_data.clear()
                 st.rerun()
 
-    with st.expander("Send approved UMD drafts manually"):
-        st.warning("Sending from this UMD workflow is separate from the internship sender and requires explicit confirmation.")
-        send_limit = st.number_input("Send limit", min_value=1, max_value=25, value=5)
-        dry_run = st.checkbox("Dry-run only", value=True)
-        confirmation = st.text_input('Type "SEND UMD" to send approved drafts live')
-        if st.button("Run UMD approved-draft sender"):
-            live_allowed = confirmation == "SEND UMD" and not dry_run
-            if live_allowed and not settings.umd_ta_ra_send_enabled:
-                st.error("UMD_TA_RA_SEND_ENABLED is false. Enable it in local .env before live UMD sending.")
-            else:
-                with st.spinner("Processing approved UMD drafts..."):
-                    counts = umd_ta_ra_workflow.send_approved_drafts(settings, limit=int(send_limit), dry_run=not live_allowed)
-                st.success(f"UMD sender completed: {counts}")
+    st.subheader("Campaign Bulk Send With Lag")
+    st.warning("Campaign sending only uses approved drafts. Dry-run is the default and does not send Gmail messages.")
+    campaign_cols = st.columns(4)
+    with campaign_cols[0]:
+        campaign_name = st.text_input("Campaign name", value="UMD TA/RA Summer/Fall 2026 Outreach")
+        semester_target = st.selectbox("Semester target", ["Both", "Summer 2026", "Fall 2026", "General"])
+    with campaign_cols[1]:
+        min_delay = st.number_input("Minimum delay seconds", min_value=0, max_value=3600, value=settings.umd_ta_ra_min_send_delay_seconds)
+        max_delay = st.number_input("Maximum delay seconds", min_value=0, max_value=7200, value=settings.umd_ta_ra_max_send_delay_seconds)
+    with campaign_cols[2]:
+        daily_limit = st.number_input("Daily send limit", min_value=1, max_value=200, value=settings.umd_ta_ra_default_daily_limit)
+        max_campaign_emails = st.number_input("Maximum emails per campaign", min_value=1, max_value=250, value=settings.umd_ta_ra_max_contacts)
+    with campaign_cols[3]:
+        st.caption(f"Resume attachment: {resume_attachment_status_text()}")
+        selected_approved_count = int((filtered["status"] == "approved").sum()) if not filtered.empty else 0
+        metric_card("Approved in Filter", selected_approved_count)
+
+    campaign_action_cols = st.columns(4)
+    with campaign_action_cols[0]:
+        if st.button("Create campaign from selected"):
+            campaign_id, counts = umd_ta_ra_workflow.create_campaign(
+                settings,
+                campaign_name=campaign_name,
+                semester_target=semester_target,
+                contact_ids=selected_bulk_ids,
+                min_score=65,
+                max_emails=int(max_campaign_emails),
+                min_delay_seconds=int(min_delay),
+                max_delay_seconds=int(max_delay),
+                daily_send_limit=int(daily_limit),
+            )
+            st.success(f"Campaign {campaign_id} created: {counts}")
+            st.cache_data.clear()
+            st.rerun()
+    with campaign_action_cols[1]:
+        if st.button("Create campaign from all approved High + Good"):
+            campaign_id, counts = umd_ta_ra_workflow.create_campaign(
+                settings,
+                campaign_name=campaign_name,
+                semester_target=semester_target,
+                min_score=65,
+                max_emails=int(max_campaign_emails),
+                min_delay_seconds=int(min_delay),
+                max_delay_seconds=int(max_delay),
+                daily_send_limit=int(daily_limit),
+            )
+            st.success(f"Campaign {campaign_id} created: {counts}")
+            st.cache_data.clear()
+            st.rerun()
+
+    campaigns = load_umd_ta_ra_campaigns()
+    if campaigns.empty:
+        st.info("No UMD campaigns yet. Approve drafts, then create a campaign.")
+    else:
+        selected_campaign_id = st.selectbox(
+            "Campaign",
+            campaigns["id"].tolist(),
+            format_func=lambda value: (
+                f"{campaigns.loc[campaigns['id'] == value, 'campaign_name'].iloc[0]} | "
+                f"{campaigns.loc[campaigns['id'] == value, 'status'].iloc[0]} | "
+                f"{int(campaigns.loc[campaigns['id'] == value, 'approved_drafts_count'].iloc[0])} approved"
+            ),
+        )
+        campaign_row = campaigns[campaigns["id"] == selected_campaign_id].iloc[0]
+        st.markdown(f"**Campaign status:** {status_badge(str(campaign_row['status']))}", unsafe_allow_html=True)
+        progress_cols = st.columns(5)
+        with progress_cols[0]:
+            metric_card("Sent", int(campaign_row["sent_count"]))
+        with progress_cols[1]:
+            metric_card("Failed", int(campaign_row["failed_count"]))
+        with progress_cols[2]:
+            metric_card("Skipped", int(campaign_row["skipped_count"]))
+        with progress_cols[3]:
+            metric_card("Dry Runs", int(campaign_row.get("dry_run_count", 0)))
+        with progress_cols[4]:
+            metric_card("Remaining", max(int(campaign_row["approved_drafts_count"]) - int(campaign_row["sent_count"]) - int(campaign_row["skipped_count"]), 0))
+
+        send_cols = st.columns(5)
+        dry_run_campaign = send_cols[0].checkbox("Dry-run campaign", value=True)
+        live_confirm = send_cols[1].text_input('Type "SEND UMD CAMPAIGN" for live')
+        with send_cols[2]:
+            if st.button("Start Bulk Send"):
+                live_allowed = live_confirm == "SEND UMD CAMPAIGN" and not dry_run_campaign
+                if live_allowed and not settings.umd_ta_ra_send_enabled:
+                    st.error("UMD_TA_RA_SEND_ENABLED is false. Enable it in local .env before live UMD campaign sending.")
+                else:
+                    with st.spinner("Processing campaign. Live sends wait between emails; dry-run only simulates the schedule."):
+                        result = umd_ta_ra_workflow.run_campaign_send(
+                            settings,
+                            int(selected_campaign_id),
+                            dry_run=not live_allowed,
+                            min_delay_seconds=int(min_delay),
+                            max_delay_seconds=int(max_delay),
+                            daily_send_limit=int(daily_limit),
+                            max_emails=int(max_campaign_emails),
+                            sleep_between=live_allowed,
+                        )
+                    st.success(f"Campaign run complete: sent={result['sent']}, dry_run={result['dry_run']}, failed={result['failed']}, skipped={result['skipped']}")
+                    if result.get("schedule"):
+                        st.dataframe(pd.DataFrame(result["schedule"]), use_container_width=True, hide_index=True)
+                    st.cache_data.clear()
+                    st.rerun()
+        with send_cols[3]:
+            if st.button("Pause"):
+                umd_ta_ra_workflow.set_campaign_status(settings, int(selected_campaign_id), "paused")
+                st.success("Campaign paused.")
                 st.cache_data.clear()
                 st.rerun()
+            if st.button("Resume"):
+                umd_ta_ra_workflow.set_campaign_status(settings, int(selected_campaign_id), "ready")
+                st.success("Campaign resumed.")
+                st.cache_data.clear()
+                st.rerun()
+        with send_cols[4]:
+            if st.button("Stop"):
+                umd_ta_ra_workflow.set_campaign_status(settings, int(selected_campaign_id), "stopped")
+                st.success("Campaign stopped.")
+                st.cache_data.clear()
+                st.rerun()
+
+        recipients = load_umd_ta_ra_campaign_recipients(int(selected_campaign_id))
+        if not recipients.empty:
+            st.dataframe(
+                recipients[
+                    [
+                        "name",
+                        "email",
+                        "department",
+                        "fit_score",
+                        "fit_bucket",
+                        "send_status",
+                        "scheduled_send_time",
+                        "actual_send_time",
+                        "error_message",
+                        "retry_count",
+                    ]
+                ].rename(
+                    columns={
+                        "name": "Name",
+                        "email": "Email",
+                        "department": "Department",
+                        "fit_score": "Fit score",
+                        "fit_bucket": "Fit bucket",
+                        "send_status": "Send status",
+                        "scheduled_send_time": "Scheduled send time",
+                        "actual_send_time": "Actual send time",
+                        "error_message": "Error",
+                        "retry_count": "Retry count",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     st.subheader("UMD Workflow Runs")
     if runs.empty:
