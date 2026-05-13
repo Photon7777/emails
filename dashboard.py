@@ -63,6 +63,17 @@ def metric_card(label: str, value, help_text: str = "") -> None:
     )
 
 
+def resume_attachment_status_text() -> str:
+    """Human-friendly attachment status for local and hosted dashboards."""
+
+    if settings.attach_resume and settings.resume_file.exists():
+        return f"enabled ({settings.resume_file.name})"
+    if settings.attach_resume:
+        filename = settings.resume_file.name or "resume PDF"
+        return f"configured for Mac sender ({filename}); hosted dashboard cannot verify local file"
+    return "enabled in local Mac automation; hosted dashboard cannot inspect local resume"
+
+
 def load_leads() -> pd.DataFrame:
     return read_sql(
         """
@@ -1440,7 +1451,7 @@ def umd_ta_ra_outreach_page() -> None:
         )
         selected = selectable[selectable["id"] == selected_id].iloc[0]
         st.markdown(f"**Status:** {status_badge(str(selected['status']))}", unsafe_allow_html=True)
-        st.caption(f"Resume attachment: {'enabled' if settings.attach_resume and settings.resume_file.exists() else 'not available'}")
+        st.caption(f"Resume attachment: {resume_attachment_status_text()}")
         st.caption(f"Source: {selected['source_url']}")
         st.write(f"**Personalization source:** {selected.get('personalization_source') or 'Fallback'}")
         st.write(f"**Personalization confidence:** {selected.get('personalization_confidence') or 'Low'}")
