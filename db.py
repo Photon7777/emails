@@ -419,6 +419,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             email_lower TEXT DEFAULT '',
             title TEXT DEFAULT '',
             department TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            office TEXT DEFAULT '',
+            research_interests TEXT DEFAULT '',
+            courses_taught TEXT DEFAULT '',
+            lab_name TEXT DEFAULT '',
+            profile_url TEXT DEFAULT '',
             source_url TEXT NOT NULL,
             research_or_course_area TEXT DEFAULT '',
             opportunity_type TEXT DEFAULT 'General',
@@ -426,6 +432,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             fit_score INTEGER DEFAULT 0,
             fit_reason TEXT DEFAULT '',
             personalization_notes TEXT DEFAULT '',
+            personalization_context TEXT DEFAULT '',
+            personalization_source TEXT DEFAULT 'Fallback',
+            personalization_confidence TEXT DEFAULT 'Low',
             status TEXT DEFAULT 'discovered',
             discovered_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -460,10 +469,13 @@ def init_db(conn: sqlite3.Connection) -> None:
             gmail_message_id TEXT DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            error_message TEXT DEFAULT ''
+            error_message TEXT DEFAULT '',
+            validation_status TEXT DEFAULT 'Passed',
+            validation_issues TEXT DEFAULT '[]'
         )
         """
     )
+    _ensure_umd_ta_ra_columns(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_umd_drafts_contact_unique
@@ -573,23 +585,64 @@ def _migrate_apollo_usage_to_credit_events(conn: sqlite3.Connection) -> None:
         )
 
 
-def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
+def _existing_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     if is_postgres_connection(conn):
-        existing_columns = {
+        return {
             row["name"]
             for row in conn.execute(
                 """
                 SELECT column_name AS name
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
-                  AND table_name = 'leads'
-                """
+                  AND table_name = ?
+                """,
+                (table_name,),
             ).fetchall()
         }
-    else:
-        existing_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()
-        }
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table_name: str, column_defs: dict[str, str]) -> None:
+    existing_columns = _existing_columns(conn, table_name)
+    for column, definition in column_defs.items():
+        if column not in existing_columns:
+            try:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {definition}")
+            except Exception as exc:
+                message = str(exc).lower()
+                if "duplicate column" not in message and "already exists" not in message:
+                    raise
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+
+
+def _ensure_umd_ta_ra_columns(conn: sqlite3.Connection) -> None:
+    _add_missing_columns(
+        conn,
+        "umd_ta_ra_contacts",
+        {
+            "phone": "TEXT DEFAULT ''",
+            "office": "TEXT DEFAULT ''",
+            "research_interests": "TEXT DEFAULT ''",
+            "courses_taught": "TEXT DEFAULT ''",
+            "lab_name": "TEXT DEFAULT ''",
+            "profile_url": "TEXT DEFAULT ''",
+            "personalization_context": "TEXT DEFAULT ''",
+            "personalization_source": "TEXT DEFAULT 'Fallback'",
+            "personalization_confidence": "TEXT DEFAULT 'Low'",
+        },
+    )
+    _add_missing_columns(
+        conn,
+        "umd_ta_ra_email_drafts",
+        {
+            "validation_status": "TEXT DEFAULT 'Passed'",
+            "validation_issues": "TEXT DEFAULT '[]'",
+        },
+    )
+
+
+def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
     column_defs = {
         "email_source": "TEXT DEFAULT ''",
         "email_status": "TEXT DEFAULT ''",
@@ -622,16 +675,7 @@ def _ensure_lead_columns(conn: sqlite3.Connection) -> None:
         "manually_skipped": "INTEGER DEFAULT 0",
         "manual_review_note": "TEXT DEFAULT ''",
     }
-    for column, definition in column_defs.items():
-        if column not in existing_columns:
-            try:
-                conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
-            except Exception as exc:
-                message = str(exc).lower()
-                if "duplicate column" not in message and "already exists" not in message:
-                    raise
-                if hasattr(conn, "rollback"):
-                    conn.rollback()
+    _add_missing_columns(conn, "leads", column_defs)
 
 
 def _find_existing_lead(conn: sqlite3.Connection, lead: Lead) -> Optional[sqlite3.Row]:

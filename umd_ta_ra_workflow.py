@@ -28,10 +28,28 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (compatible; InternReach-UMD-TA-RA/1.0; +https://sai-praneeth-portfolio.netlify.app/)"
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@(?:umd\.edu|[A-Z0-9.-]+\.umd\.edu)\b", re.IGNORECASE)
+ANY_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PHONE_RE = re.compile(r"(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+OFFICE_RE = re.compile(
+    r"\b(?:room|rm\.?|office|suite)\s*[A-Z]?\d{2,5}[A-Z]?\b|"
+    r"\b\d{3,5}\s+(?:Van Munching|Hornbake|Iribe|A\.?\s*V\.?\s*Williams|Kim|Glenn L\.?\s*Martin|"
+    r"Tydings|Kirwan|Marie Mount|Morrill|Symons|Skinner|McKeldin|Tawes|Woods|LeFrak|"
+    r"Chincoteague|Susquehanna|Computer Science Instructional Center|CSI|Engineering|Physics|"
+    r"Biology[- ]Psychology)[\w\s.-]*(?:Hall|Building|Bldg|Center)?\b",
+    re.IGNORECASE,
+)
+BUILDING_WORD_RE = re.compile(r"\b(?:Hall|Building|Bldg|Center|Room|Office|Suite|Van Munching|Hornbake|Iribe|Tydings|Kirwan)\b", re.IGNORECASE)
 HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.IGNORECASE)
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 TAG_RE = re.compile(r"<[^>]+>")
+LABEL_RE = re.compile(r"\b(?:Contact|Phone|Email|Office|Fax|Location|Address|Room|Website)\b\s*:?", re.IGNORECASE)
+DIRECTORY_DUMP_RE = re.compile(
+    r"professor\s+of\s+management\s+science\s+decision|"
+    r"professor\s+email\s+office\s+phone|"
+    r"\bcontact\b.*\b(phone|email|office)\b",
+    re.IGNORECASE,
+)
 
 SEARCH_QUERIES = [
     "site:umd.edu teaching assistant",
@@ -100,6 +118,22 @@ OPPORTUNITY_KEYWORDS = {
     "Faculty Assistant": ("faculty assistant", "program coordinator", "academic coordinator"),
 }
 TITLE_KEYWORDS = ("professor", "lecturer", "instructor", "faculty", "coordinator", "director", "research scientist")
+PERSON_TITLE_RE = re.compile(
+    r"\b(?:Tyser\s+)?(?:Assistant|Associate|Clinical|Visiting|Adjunct|Full)?\s*"
+    r"(?:Professor|Lecturer|Instructor|Faculty Director|Director|Coordinator|Research Scientist)"
+    r"(?:\s+of\s+[A-Z][A-Za-z,&\s-]{2,80})?",
+    re.IGNORECASE,
+)
+FIELD_STOP_RE = re.compile(
+    r"\b(?:Contact|Phone|Email|Office|Fax|Location|Address|Biography|Education|Publications|"
+    r"Research|Teaching|Courses|Appointments|Awards)\b",
+    re.IGNORECASE,
+)
+RESEARCH_LABEL_RE = re.compile(
+    r"\b(?:research interests?|areas? of interest|research areas?|expertise|specialties|topics?)\b\s*:?\s*",
+    re.IGNORECASE,
+)
+COURSE_LABEL_RE = re.compile(r"\b(?:courses taught|teaching|courses?)\b\s*:?\s*", re.IGNORECASE)
 
 
 @dataclass
@@ -108,6 +142,12 @@ class UmdContact:
     email: str
     title: str
     department: str
+    phone: str
+    office: str
+    research_interests: str
+    courses_taught: str
+    lab_name: str
+    profile_url: str
     source_url: str
     research_or_course_area: str
     opportunity_type: str
@@ -115,6 +155,9 @@ class UmdContact:
     fit_score: int
     fit_reason: str
     personalization_notes: str
+    personalization_context: str
+    personalization_source: str
+    personalization_confidence: str
     status: str = "discovered"
     raw_text: str = ""
 
@@ -125,6 +168,151 @@ class UmdContact:
 
 def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(value or "")).strip()
+
+
+def _word_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9]+", value or ""))
+
+
+def _dedupe_words_phrase(value: str) -> str:
+    pieces = []
+    seen = set()
+    for part in re.split(r"\s*(?:,|;|\||/)\s*", value or ""):
+        cleaned = _clean_text(part).strip(" .,-")
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            pieces.append(cleaned)
+    return ", ".join(pieces)
+
+
+def clean_personalization_text(raw_text: str, *, max_words: int = 15, allow_long_clean: bool = False) -> str | None:
+    """Return email-safe personalization text or None.
+
+    UMD pages often render full faculty cards as one text blob. This function
+    rejects those blobs instead of letting directory metadata appear in an email.
+    """
+
+    if not raw_text:
+        return None
+    original = _clean_text(raw_text)
+    if not original:
+        return None
+    original_metadata_hits = sum(
+        1
+        for pattern in (ANY_EMAIL_RE, PHONE_RE, OFFICE_RE, LABEL_RE)
+        if pattern.search(original)
+    )
+    if original_metadata_hits >= 2 and _word_count(original) > 8:
+        return None
+
+    text = TAG_RE.sub(" ", original)
+    text = ANY_EMAIL_RE.sub(" ", text)
+    text = PHONE_RE.sub(" ", text)
+    text = OFFICE_RE.sub(" ", text)
+    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    text = LABEL_RE.sub(" ", text)
+    text = PERSON_TITLE_RE.sub(" ", text)
+    text = re.sub(r"\b(?:Tel|Telephone|Mail|Website)\b\s*:?", " ", text, flags=re.IGNORECASE)
+    text = _clean_text(text).strip(" .,-:;|")
+    text = _dedupe_words_phrase(text)
+
+    if not text:
+        return None
+    if ANY_EMAIL_RE.search(text) or PHONE_RE.search(text) or OFFICE_RE.search(text):
+        return None
+    if BUILDING_WORD_RE.search(text):
+        return None
+    if DIRECTORY_DUMP_RE.search(original) or DIRECTORY_DUMP_RE.search(text):
+        return None
+    if re.search(r"\b\d{3,5}\b", text):
+        return None
+    metadata_hits = len(re.findall(r"\b(?:professor|contact|phone|email|office|room|hall|building)\b", text, re.IGNORECASE))
+    if metadata_hits:
+        return None
+    word_limit = max_words if not allow_long_clean else max(max_words, 22)
+    if _word_count(text) > word_limit:
+        return None
+    if len(re.split(r"\s+", text)) <= 1 and len(text) < 6:
+        return None
+    return text
+
+
+def _department_phrase(department: str) -> str | None:
+    clean_department = clean_personalization_text(department, max_words=12, allow_long_clean=True)
+    if not clean_department or clean_department.lower() == "university of maryland":
+        return None
+    if any(word in clean_department.lower() for word in ("school", "college", "institute", "program")):
+        return f"the {clean_department}"
+    if clean_department.lower().endswith("department"):
+        return f"the {clean_department}"
+    return f"the {clean_department} department"
+
+
+def _extract_after_label(text: str, label_re: re.Pattern, *, max_words: int = 15) -> str:
+    match = label_re.search(text or "")
+    if not match:
+        return ""
+    fragment = text[match.end() : match.end() + 260]
+    fragment = FIELD_STOP_RE.split(fragment, maxsplit=1)[0]
+    fragment = re.split(r"(?<=[.!?])\s+", fragment, maxsplit=1)[0]
+    return clean_personalization_text(fragment, max_words=max_words, allow_long_clean=True) or ""
+
+
+def _keyword_context(text: str) -> str:
+    lower_text = (text or "").lower()
+    priority_phrases = [
+        "social impact",
+        "operations analytics",
+        "business analytics",
+        "data-driven decision-making",
+        "data driven decision making",
+        "machine learning",
+        "artificial intelligence",
+        "information systems",
+        "marketing analytics",
+        "operations management",
+        "management science",
+        "business technology",
+        "data science",
+    ]
+    for phrase in priority_phrases:
+        if phrase in lower_text:
+            return phrase
+    for sentence in _sentences(text):
+        cleaned = clean_personalization_text(sentence, max_words=15, allow_long_clean=True)
+        if cleaned and any(keyword in cleaned.lower() for keyword in SKILL_KEYWORDS):
+            return cleaned
+    return ""
+
+
+def _extract_phone(text: str) -> str:
+    match = PHONE_RE.search(text or "")
+    return match.group(0) if match else ""
+
+
+def _extract_office(text: str) -> str:
+    match = OFFICE_RE.search(text or "")
+    return _clean_text(match.group(0)) if match else ""
+
+
+def _extract_research_interests(text: str) -> str:
+    labeled = _extract_after_label(text, RESEARCH_LABEL_RE, max_words=18)
+    if labeled:
+        return labeled
+    return clean_personalization_text(_keyword_context(text), max_words=15, allow_long_clean=True) or ""
+
+
+def _extract_courses_taught(text: str) -> str:
+    return _extract_after_label(text, COURSE_LABEL_RE, max_words=16)
+
+
+def _extract_lab_name(title: str, text: str) -> str:
+    combined = f"{title} {text[:1500]}"
+    match = re.search(r"\b([A-Z][A-Za-z& -]{2,80}\s+(?:Lab|Laboratory|Center|Group))\b", combined)
+    if not match:
+        return ""
+    return clean_personalization_text(match.group(1), max_words=10, allow_long_clean=True) or ""
 
 
 def _html_to_text(html: str) -> str:
@@ -269,16 +457,46 @@ def _infer_title(text: str) -> str:
     return "Faculty/Staff"
 
 
+def _title_near_email(email: str, text: str, fallback: str) -> str:
+    if not email or not text:
+        return fallback
+    index = text.lower().find(email.lower())
+    segment = text[max(0, index - 360) : min(len(text), index + 180)] if index >= 0 else text[:1200]
+    patterns = [
+        r"\bTyser Professor of Management Science\b",
+        r"\b(?:Assistant|Associate|Clinical|Visiting|Adjunct|Full)\s+Professor\b",
+        r"\bProfessor\b",
+        r"\bLecturer\b",
+        r"\bInstructor\b",
+        r"\bResearch Scientist\b",
+        r"\bProgram Coordinator\b",
+        r"\b(?:Faculty )?Director\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, segment, re.IGNORECASE)
+        if match:
+            return _clean_text(match.group(0)).title().replace("Of", "of")
+    return fallback
+
+
 def _sentences(text: str) -> list[str]:
     return [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text or "") if sentence.strip()]
 
 
 def _area_from_text(text: str, title: str) -> str:
+    course = _extract_courses_taught(text)
+    if course:
+        return course
+    research = _extract_research_interests(text)
+    if research:
+        return research
     for sentence in _sentences(text):
         lower = sentence.lower()
         if any(keyword in lower for keyword in SKILL_KEYWORDS + tuple(sum(OPPORTUNITY_KEYWORDS.values(), ()))) and len(sentence) <= 220:
-            return sentence
-    return title[:180] or "UMD course or research support"
+            cleaned = clean_personalization_text(sentence, max_words=15, allow_long_clean=True)
+            if cleaned:
+                return cleaned
+    return clean_personalization_text(title, max_words=12, allow_long_clean=True) or "UMD course or research support"
 
 
 def _name_from_email_or_page(email: str, text: str, title: str) -> str:
@@ -317,7 +535,11 @@ def _name_from_email_or_page(email: str, text: str, title: str) -> str:
 
 
 def score_contact(contact: UmdContact) -> tuple[int, str]:
-    text = f"{contact.department} {contact.title} {contact.research_or_course_area} {contact.opportunity_type} {contact.raw_text[:2500]}".lower()
+    text = (
+        f"{contact.department} {contact.title} {contact.research_interests} "
+        f"{contact.courses_taught} {contact.lab_name} {contact.research_or_course_area} "
+        f"{contact.opportunity_type} {contact.raw_text[:2500]}"
+    ).lower()
     score = 0
     reasons = []
 
@@ -357,16 +579,28 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
     semester = _infer_semester(text)
     area = _area_from_text(text, title)
     title_guess = _infer_title(f"{title} {text[:1200]}")
+    phone = _extract_phone(text)
+    office = _extract_office(text)
+    research_interests = _extract_research_interests(text)
+    courses_taught = _extract_courses_taught(text)
+    lab_name = _extract_lab_name(title, text)
     emails = sorted({email.lower() for email in EMAIL_RE.findall(html + " " + text)})
 
     contacts = []
     for email in emails[:12]:
         name = _name_from_email_or_page(email, text, title)
+        contact_title = _title_near_email(email, text, title_guess)
         contact = UmdContact(
             name=name,
             email=email,
-            title=title_guess,
+            title=contact_title,
             department=department,
+            phone=phone,
+            office=office,
+            research_interests=research_interests,
+            courses_taught=courses_taught,
+            lab_name=lab_name,
+            profile_url=url,
             source_url=url,
             research_or_course_area=area,
             opportunity_type=opportunity_type,
@@ -374,10 +608,14 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
             fit_score=0,
             fit_reason="",
             personalization_notes="",
+            personalization_context="",
+            personalization_source="Fallback",
+            personalization_confidence="Low",
             status="discovered",
             raw_text=text[:5000],
         )
         contact.fit_score, contact.fit_reason = score_contact(contact)
+        _apply_personalization(contact)
         contact.personalization_notes = _personalization_notes(contact)
         contact.status = "drafted" if contact.email and contact.fit_score >= 55 else "discovered"
         contacts.append(contact)
@@ -388,6 +626,12 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
             email="",
             title=title_guess,
             department=department,
+            phone=phone,
+            office=office,
+            research_interests=research_interests,
+            courses_taught=courses_taught,
+            lab_name=lab_name,
+            profile_url=url,
             source_url=url,
             research_or_course_area=area,
             opportunity_type=opportunity_type,
@@ -395,23 +639,56 @@ def extract_contacts_from_page(url: str, html: str) -> list[UmdContact]:
             fit_score=0,
             fit_reason="",
             personalization_notes="",
+            personalization_context="",
+            personalization_source="Fallback",
+            personalization_confidence="Low",
             status="missing_email",
             raw_text=text[:5000],
         )
         contact.fit_score, contact.fit_reason = score_contact(contact)
+        _apply_personalization(contact)
         contact.personalization_notes = _personalization_notes(contact)
         contacts.append(contact)
     return contacts
 
 
 def _personalization_notes(contact: UmdContact) -> str:
+    source = contact.personalization_source or "Fallback"
+    context = contact.personalization_context or ""
     if contact.opportunity_type in {"TA", "Grader", "Course Support"}:
-        return f"Mention course support interest around {contact.research_or_course_area[:140]}."
+        return f"Use {source.lower()} personalization for course support interest: {context or 'general UMD support'}."
     if contact.opportunity_type == "RA":
-        return f"Mention research support interest around {contact.research_or_course_area[:140]}."
+        return f"Use {source.lower()} personalization for research support interest: {context or 'general UMD research support'}."
     if "coordinator" in contact.title.lower() or contact.opportunity_type == "Faculty Assistant":
         return "Ask whether they can direct you to TA, RA, grader, or course support openings."
-    return f"Connect your analytics, AI/ML, dashboards, and SQL/Python background to {contact.department}."
+    return f"Connect your analytics, AI/ML, dashboards, and SQL/Python background to {context or contact.department}."
+
+
+def select_best_personalization(contact: UmdContact) -> tuple[str, str, str]:
+    """Choose clean personalization text in course -> research -> department order."""
+
+    course = clean_personalization_text(contact.courses_taught, max_words=16, allow_long_clean=True)
+    if course:
+        return course, "Course", "High"
+
+    research_candidates = [contact.research_interests, contact.lab_name]
+    for raw in research_candidates:
+        research = clean_personalization_text(raw, max_words=16, allow_long_clean=True)
+        if research:
+            return research, "Research", "High" if raw == contact.research_interests else "Medium"
+
+    department = _department_phrase(contact.department)
+    if department:
+        return department, "Department", "Medium"
+
+    return "", "Fallback", "Low"
+
+
+def _apply_personalization(contact: UmdContact) -> None:
+    text, source, confidence = select_best_personalization(contact)
+    contact.personalization_context = text
+    contact.personalization_source = source
+    contact.personalization_confidence = confidence
 
 
 def _last_name(name: str) -> str:
@@ -420,19 +697,35 @@ def _last_name(name: str) -> str:
 
 
 def render_umd_email(contact: UmdContact, settings: Settings) -> tuple[str, str]:
+    _apply_personalization(contact)
     last = _last_name(contact.name)
-    greeting = f"Dear Professor {last}," if last and "professor" in contact.title.lower() else f"Dear {contact.name},"
+    is_professor = "professor" in (contact.title or "").lower()
+    greeting = f"Dear Professor {last}," if last and is_professor else f"Dear {contact.name},"
     if contact.name == "UMD Faculty or Staff":
         greeting = "Hello,"
 
-    if contact.opportunity_type in {"TA", "Grader", "Course Support"}:
-        focus = f"course support related to {contact.research_or_course_area}"
-    elif contact.opportunity_type == "RA":
-        focus = f"research support related to {contact.research_or_course_area}"
-    elif "coordinator" in contact.title.lower():
-        focus = f"TA, RA, grader, or course support opportunities in {contact.department}"
+    context = contact.personalization_context
+    source = contact.personalization_source
+    if source == "Course" and context:
+        interest_sentence = (
+            "I wanted to reach out to express my interest in any TA, grader, research assistant, "
+            f"or course support opportunities related to your course, {context}, for Summer 2026 or Fall 2026."
+        )
+    elif source == "Research" and context:
+        interest_sentence = (
+            "I wanted to reach out to express my interest in any TA, grader, research assistant, "
+            f"or course support opportunities related to your research in {context} for Summer 2026 or Fall 2026."
+        )
+    elif source == "Department" and context:
+        interest_sentence = (
+            "I wanted to reach out to express my interest in any TA, grader, research assistant, "
+            f"or course support opportunities within {context} for Summer 2026 or Fall 2026."
+        )
     else:
-        focus = f"TA, RA, grader, or course support opportunities connected to {contact.department}"
+        interest_sentence = (
+            "I wanted to reach out to express my interest in any TA, grader, research assistant, "
+            "or course support opportunities for Summer 2026 or Fall 2026."
+        )
 
     technical = any(keyword in contact.department.lower() for keyword in ("computer", "engineering", "information", "data", "math", "statistics"))
     if technical:
@@ -444,7 +737,7 @@ def render_umd_email(contact: UmdContact, settings: Settings) -> tuple[str, str]
     body = (
         f"{greeting}\n\n"
         "I hope you are doing well. My name is Sai Praneeth Kathi Moksha, and I am currently pursuing my M.S. in Information Systems at the Robert H. Smith School of Business, University of Maryland, College Park.\n\n"
-        f"I wanted to reach out to express my interest in any TA, grader, research assistant, or course support opportunities around {focus} for Summer 2026 or Fall 2026.\n\n"
+        f"{interest_sentence}\n\n"
         f"My background includes {skills}. I believe these experiences would allow me to support students, course activities, research work, and analytical tasks effectively.\n\n"
         "I have attached my resume for reference and would be grateful if you would consider me for any current or future opportunities that may be a good fit.\n\n"
         "Thank you for your time, and I hope to stay connected.\n\n"
@@ -456,6 +749,61 @@ def render_umd_email(contact: UmdContact, settings: Settings) -> tuple[str, str]
     )
     lines = [line.rstrip() for line in body.splitlines()]
     return subject, "\n".join(line for line in lines if line.strip() or line == "")
+
+
+def _extract_personalization_phrase(body: str) -> str:
+    match = re.search(
+        r"opportunities\s+(?:related to|within)\s+(.+?)\s+for Summer 2026 or Fall 2026",
+        body or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ""
+    return _clean_text(match.group(1))
+
+
+def validate_umd_draft(subject: str, body: str, settings: Settings | None = None) -> tuple[str, list[str]]:
+    """Validate UMD drafts before approval or sending.
+
+    Validation is intentionally conservative because these messages go to
+    university faculty and staff. Failing drafts are left reviewable, not sent.
+    """
+
+    issues = []
+    body_for_email_check = body or ""
+    if settings and settings.sender_email:
+        body_for_email_check = body_for_email_check.replace(settings.sender_email, "")
+    if PHONE_RE.search(body_for_email_check):
+        issues.append("Body contains a phone number.")
+    if ANY_EMAIL_RE.search(body_for_email_check):
+        issues.append("Body contains an email address outside the sender signature.")
+    if OFFICE_RE.search(body_for_email_check) or BUILDING_WORD_RE.search(_extract_personalization_phrase(body_for_email_check)):
+        issues.append("Body contains office, room, address, or building metadata.")
+    if re.search(r"\bContact\b", body_for_email_check):
+        issues.append('Body contains directory label "Contact".')
+    if DIRECTORY_DUMP_RE.search(body_for_email_check):
+        issues.append("Body contains a phrase that looks like copied faculty directory metadata.")
+
+    personalization_phrase = _extract_personalization_phrase(body_for_email_check)
+    if personalization_phrase:
+        if _word_count(personalization_phrase) > 20:
+            issues.append("Personalization phrase is longer than 20 words.")
+        if not clean_personalization_text(personalization_phrase, max_words=20, allow_long_clean=True):
+            issues.append("Personalization phrase is not clean enough for outreach.")
+    for line in (body or "").splitlines():
+        lowered = line.lower()
+        metadata_hits = sum(1 for token in ("contact", "phone", "email", "office", "room", "hall", "building") if token in lowered)
+        if metadata_hits >= 2:
+            issues.append("A body line looks like copied directory metadata.")
+            break
+
+    deduped = []
+    seen = set()
+    for issue in issues:
+        if issue not in seen:
+            seen.add(issue)
+            deduped.append(issue)
+    return ("Needs Review" if deduped else "Passed"), deduped
 
 
 def _start_run(conn, run_type: str) -> int:
@@ -513,8 +861,17 @@ def _find_existing_contact(conn, contact: UmdContact):
 
 def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
     now = utc_now_iso()
+    _apply_personalization(contact)
     existing = _find_existing_contact(conn, contact)
-    raw_json = json.dumps({"source_url": contact.source_url}, sort_keys=True)
+    raw_json = json.dumps(
+        {
+            "source_url": contact.source_url,
+            "profile_url": contact.profile_url,
+            "personalization_source": contact.personalization_source,
+            "personalization_confidence": contact.personalization_confidence,
+        },
+        sort_keys=True,
+    )
     if existing:
         contact_id = int(existing["id"])
         terminal = (existing["status"] or "") in {"sent", "skipped", "not_relevant", "follow_up_needed"}
@@ -528,12 +885,21 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 email_lower = COALESCE(NULLIF(?, ''), email_lower),
                 title = COALESCE(NULLIF(?, ''), title),
                 department = COALESCE(NULLIF(?, ''), department),
+                phone = COALESCE(NULLIF(?, ''), phone),
+                office = COALESCE(NULLIF(?, ''), office),
+                research_interests = COALESCE(NULLIF(?, ''), research_interests),
+                courses_taught = COALESCE(NULLIF(?, ''), courses_taught),
+                lab_name = COALESCE(NULLIF(?, ''), lab_name),
+                profile_url = COALESCE(NULLIF(?, ''), profile_url),
                 research_or_course_area = COALESCE(NULLIF(?, ''), research_or_course_area),
                 opportunity_type = COALESCE(NULLIF(?, ''), opportunity_type),
                 semester = COALESCE(NULLIF(?, ''), semester),
                 fit_score = ?,
                 fit_reason = COALESCE(NULLIF(?, ''), fit_reason),
                 personalization_notes = COALESCE(NULLIF(?, ''), personalization_notes),
+                personalization_context = COALESCE(NULLIF(?, ''), personalization_context),
+                personalization_source = COALESCE(NULLIF(?, ''), personalization_source),
+                personalization_confidence = COALESCE(NULLIF(?, ''), personalization_confidence),
                 status = ?,
                 updated_at = ?,
                 raw_text = COALESCE(NULLIF(?, ''), raw_text),
@@ -546,12 +912,21 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
                 contact.email_lower,
                 contact.title,
                 contact.department,
+                contact.phone,
+                contact.office,
+                contact.research_interests,
+                contact.courses_taught,
+                contact.lab_name,
+                contact.profile_url,
                 contact.research_or_course_area,
                 contact.opportunity_type,
                 contact.semester,
                 fit_score,
                 contact.fit_reason,
                 contact.personalization_notes,
+                contact.personalization_context,
+                contact.personalization_source,
+                contact.personalization_confidence,
                 status,
                 now,
                 contact.raw_text,
@@ -570,6 +945,12 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
         contact.email_lower,
         contact.title,
         contact.department,
+        contact.phone,
+        contact.office,
+        contact.research_interests,
+        contact.courses_taught,
+        contact.lab_name,
+        contact.profile_url,
         contact.source_url,
         contact.research_or_course_area,
         contact.opportunity_type,
@@ -577,6 +958,9 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
         contact.fit_score,
         contact.fit_reason,
         contact.personalization_notes,
+        contact.personalization_context,
+        contact.personalization_source,
+        contact.personalization_confidence,
         contact.status,
         now,
         now,
@@ -587,12 +971,14 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
         row = conn.execute(
             """
             INSERT INTO umd_ta_ra_contacts (
-                name, email, email_lower, title, department, source_url,
+                name, email, email_lower, title, department,
+                phone, office, research_interests, courses_taught, lab_name, profile_url, source_url,
                 research_or_course_area, opportunity_type, semester, fit_score,
-                fit_reason, personalization_notes, status, discovered_at, updated_at,
+                fit_reason, personalization_notes, personalization_context,
+                personalization_source, personalization_confidence, status, discovered_at, updated_at,
                 raw_text, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             params,
@@ -602,12 +988,14 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
         conn.execute(
             """
             INSERT INTO umd_ta_ra_contacts (
-                name, email, email_lower, title, department, source_url,
+                name, email, email_lower, title, department,
+                phone, office, research_interests, courses_taught, lab_name, profile_url, source_url,
                 research_or_course_area, opportunity_type, semester, fit_score,
-                fit_reason, personalization_notes, status, discovered_at, updated_at,
+                fit_reason, personalization_notes, personalization_context,
+                personalization_source, personalization_confidence, status, discovered_at, updated_at,
                 raw_text, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             params,
         )
@@ -618,6 +1006,8 @@ def upsert_contact(conn, contact: UmdContact) -> tuple[int, bool]:
 
 def create_or_update_draft(conn, contact_id: int, contact: UmdContact, settings: Settings) -> int:
     subject, body = render_umd_email(contact, settings)
+    validation_status, validation_issues = validate_umd_draft(subject, body, settings)
+    draft_status = "needs_review" if validation_issues else "drafted"
     now = utc_now_iso()
     existing = conn.execute(
         "SELECT id, status FROM umd_ta_ra_email_drafts WHERE contact_id = ? LIMIT 1",
@@ -629,38 +1019,88 @@ def create_or_update_draft(conn, contact_id: int, contact: UmdContact, settings:
             conn.execute(
                 """
                 UPDATE umd_ta_ra_email_drafts
-                SET subject = ?, body = ?, updated_at = ?, status = 'drafted', error_message = ''
+                SET subject = ?, body = ?, updated_at = ?, status = ?,
+                    error_message = ?, validation_status = ?, validation_issues = ?
                 WHERE id = ?
                 """,
-                (subject, body, now, draft_id),
+                (
+                    subject,
+                    body,
+                    now,
+                    draft_status,
+                    "; ".join(validation_issues),
+                    validation_status,
+                    json.dumps(validation_issues),
+                    draft_id,
+                ),
             )
     else:
         if db.is_postgres_connection(conn):
             row = conn.execute(
                 """
-                INSERT INTO umd_ta_ra_email_drafts (contact_id, subject, body, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'drafted', ?, ?)
+                INSERT INTO umd_ta_ra_email_drafts (
+                    contact_id, subject, body, status, created_at, updated_at,
+                    error_message, validation_status, validation_issues
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
-                (contact_id, subject, body, now, now),
+                (
+                    contact_id,
+                    subject,
+                    body,
+                    draft_status,
+                    now,
+                    now,
+                    "; ".join(validation_issues),
+                    validation_status,
+                    json.dumps(validation_issues),
+                ),
             ).fetchone()
             draft_id = int(row["id"])
         else:
             conn.execute(
                 """
-                INSERT INTO umd_ta_ra_email_drafts (contact_id, subject, body, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'drafted', ?, ?)
+                INSERT INTO umd_ta_ra_email_drafts (
+                    contact_id, subject, body, status, created_at, updated_at,
+                    error_message, validation_status, validation_issues
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (contact_id, subject, body, now, now),
+                (
+                    contact_id,
+                    subject,
+                    body,
+                    draft_status,
+                    now,
+                    now,
+                    "; ".join(validation_issues),
+                    validation_status,
+                    json.dumps(validation_issues),
+                ),
             )
             draft_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
     conn.execute(
         """
         UPDATE umd_ta_ra_contacts
-        SET email_draft_id = ?, status = CASE WHEN status NOT IN ('approved', 'sent', 'skipped', 'not_relevant') THEN 'drafted' ELSE status END, updated_at = ?
+        SET email_draft_id = ?,
+            status = CASE WHEN status NOT IN ('approved', 'sent', 'skipped', 'not_relevant')
+                THEN ? ELSE status END,
+            personalization_context = ?,
+            personalization_source = ?,
+            personalization_confidence = ?,
+            updated_at = ?
         WHERE id = ?
         """,
-        (draft_id, now, contact_id),
+        (
+            draft_id,
+            draft_status,
+            contact.personalization_context,
+            contact.personalization_source,
+            contact.personalization_confidence,
+            now,
+            contact_id,
+        ),
     )
     conn.commit()
     return draft_id
@@ -756,14 +1196,94 @@ def run_discovery(settings: Settings, max_pages: int | None = None) -> dict[str,
     return counts
 
 
-def approve_draft(settings: Settings, contact_id: int) -> None:
+def _contact_from_row(row) -> UmdContact:
+    contact = UmdContact(
+        name=row["name"] or "UMD Faculty or Staff",
+        email=row["email"] or "",
+        title=row["title"] or "Faculty/Staff",
+        department=row["department"] or "University of Maryland",
+        phone=row["phone"] or "",
+        office=row["office"] or "",
+        research_interests=row["research_interests"] or "",
+        courses_taught=row["courses_taught"] or "",
+        lab_name=row["lab_name"] or "",
+        profile_url=row["profile_url"] or row["source_url"] or "",
+        source_url=row["source_url"] or "",
+        research_or_course_area=row["research_or_course_area"] or "",
+        opportunity_type=row["opportunity_type"] or "General",
+        semester=row["semester"] or "General",
+        fit_score=int(row["fit_score"] or 0),
+        fit_reason=row["fit_reason"] or "",
+        personalization_notes=row["personalization_notes"] or "",
+        personalization_context=row["personalization_context"] or "",
+        personalization_source=row["personalization_source"] or "Fallback",
+        personalization_confidence=row["personalization_confidence"] or "Low",
+        status=row["status"] or "discovered",
+        raw_text=row["raw_text"] or "",
+    )
+    _apply_personalization(contact)
+    return contact
+
+
+def regenerate_clean_draft(settings: Settings, contact_id: int) -> tuple[str, list[str]]:
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        row = conn.execute("SELECT * FROM umd_ta_ra_contacts WHERE id = ? LIMIT 1", (contact_id,)).fetchone()
+        if not row:
+            raise ValueError(f"UMD contact {contact_id} was not found.")
+        contact = _contact_from_row(row)
+        create_or_update_draft(conn, contact_id, contact, settings)
+        draft = conn.execute(
+            "SELECT validation_status, validation_issues FROM umd_ta_ra_email_drafts WHERE contact_id = ? LIMIT 1",
+            (contact_id,),
+        ).fetchone()
+        issues = json.loads(draft["validation_issues"] or "[]") if draft else []
+        return (draft["validation_status"] if draft else "Needs Review"), issues
+
+
+def approve_draft(settings: Settings, contact_id: int) -> tuple[bool, list[str]]:
     now = utc_now_iso()
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
+        row = conn.execute(
+            """
+            SELECT d.subject, d.body
+            FROM umd_ta_ra_email_drafts d
+            WHERE d.contact_id = ?
+            LIMIT 1
+            """,
+            (contact_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("No draft exists for this contact.")
+        validation_status, validation_issues = validate_umd_draft(row["subject"], row["body"], settings)
+        if validation_issues:
+            conn.execute(
+                """
+                UPDATE umd_ta_ra_email_drafts
+                SET status = 'needs_review', validation_status = ?, validation_issues = ?,
+                    error_message = ?, updated_at = ?
+                WHERE contact_id = ?
+                """,
+                (
+                    validation_status,
+                    json.dumps(validation_issues),
+                    "; ".join(validation_issues),
+                    now,
+                    contact_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE umd_ta_ra_contacts SET status = 'needs_review', updated_at = ? WHERE id = ?",
+                (now, contact_id),
+            )
+            conn.commit()
+            return False, validation_issues
         conn.execute(
             """
             UPDATE umd_ta_ra_email_drafts
-            SET status = 'approved', approved_at = ?, updated_at = ?
+            SET status = 'approved', approved_at = ?, updated_at = ?,
+                validation_status = 'Passed', validation_issues = '[]', error_message = ''
             WHERE contact_id = ?
             """,
             (now, now, contact_id),
@@ -777,25 +1297,36 @@ def approve_draft(settings: Settings, contact_id: int) -> None:
             (now, contact_id),
         )
         conn.commit()
+    return True, []
 
 
-def update_draft(settings: Settings, contact_id: int, subject: str, body: str) -> None:
+def update_draft(settings: Settings, contact_id: int, subject: str, body: str) -> tuple[str, list[str]]:
     now = utc_now_iso()
+    validation_status, validation_issues = validate_umd_draft(subject, body, settings)
+    draft_status = "needs_review" if validation_issues else "drafted"
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
         conn.execute(
             """
             UPDATE umd_ta_ra_email_drafts
-            SET subject = ?, body = ?, status = 'drafted', updated_at = ?
+            SET subject = ?, body = ?, status = ?, updated_at = ?,
+                validation_status = ?, validation_issues = ?, error_message = ?
             WHERE contact_id = ?
             """,
-            (subject[:500], body, now, contact_id),
+            (
+                subject[:500],
+                body,
+                draft_status,
+                now,
+                validation_status,
+                json.dumps(validation_issues),
+                "; ".join(validation_issues),
+                contact_id,
+            ),
         )
-        conn.execute(
-            "UPDATE umd_ta_ra_contacts SET status = 'drafted', updated_at = ? WHERE id = ?",
-            (now, contact_id),
-        )
+        conn.execute("UPDATE umd_ta_ra_contacts SET status = ?, updated_at = ? WHERE id = ?", (draft_status, now, contact_id))
         conn.commit()
+    return validation_status, validation_issues
 
 
 def mark_contact_status(settings: Settings, contact_id: int, status: str, note: str = "") -> None:
@@ -851,6 +1382,31 @@ def send_approved_drafts(settings: Settings, limit: int = 5, dry_run: bool = Tru
             (limit,),
         ).fetchall()
         for row in rows:
+            validation_status, validation_issues = validate_umd_draft(row["subject"], row["body"], settings)
+            if validation_issues:
+                now = utc_now_iso()
+                conn.execute(
+                    """
+                    UPDATE umd_ta_ra_email_drafts
+                    SET status = 'needs_review', validation_status = ?, validation_issues = ?,
+                        error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        validation_status,
+                        json.dumps(validation_issues),
+                        "; ".join(validation_issues),
+                        now,
+                        row["draft_id"],
+                    ),
+                )
+                conn.execute(
+                    "UPDATE umd_ta_ra_contacts SET status = 'needs_review', updated_at = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+                _log(conn, run_id, "validation_failed", row["source_url"], "; ".join(validation_issues))
+                counts["failed"] += 1
+                continue
             if dry_run or not settings.umd_ta_ra_send_enabled:
                 _log(conn, run_id, "dry_run", row["source_url"], f"Would send UMD TA/RA email to {row['email']}")
                 counts["dry_run"] += 1

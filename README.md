@@ -349,6 +349,13 @@ python main.py umd-send-approved --live --limit 5
 
 The Streamlit dashboard has a sidebar page called **UMD TA/RA Outreach** where you can run discovery, filter contacts, review/edit drafts, approve, skip, mark follow-up needed, and view UMD-specific logs. A separate optional launchd plist is provided at `launchd/com.sai.umd-ta-ra-discover.plist`; load it only if you want this UMD discovery workflow scheduled independently.
 
+UMD draft quality guardrails:
+
+- Scraped faculty profile data is split into structured fields such as title, department, phone, office, research interests, courses, lab name, and profile URL.
+- Email personalization is selected in this order: clean course title, clean research interest, clean department, then a generic fallback.
+- Raw faculty card text, phone numbers, office locations, room numbers, and labels like `Contact`, `Phone`, `Email`, or `Office` are never used directly in email copy.
+- Drafts are validated before approval. If a draft contains directory metadata or messy personalization, it is marked `needs_review` and must be regenerated or edited before approval.
+
 ## Manual Test Commands
 
 Run these before scheduling anything:

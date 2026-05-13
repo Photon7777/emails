@@ -255,6 +255,12 @@ def load_umd_ta_ra_contacts() -> pd.DataFrame:
             c.email,
             c.title,
             c.department,
+            c.phone,
+            c.office,
+            c.research_interests,
+            c.courses_taught,
+            c.lab_name,
+            c.profile_url,
             c.source_url,
             c.research_or_course_area,
             c.opportunity_type,
@@ -262,6 +268,9 @@ def load_umd_ta_ra_contacts() -> pd.DataFrame:
             c.fit_score,
             c.fit_reason,
             c.personalization_notes,
+            c.personalization_context,
+            c.personalization_source,
+            c.personalization_confidence,
             c.status,
             c.discovered_at,
             c.updated_at,
@@ -272,7 +281,9 @@ def load_umd_ta_ra_contacts() -> pd.DataFrame:
             d.status AS draft_status,
             d.approved_at,
             d.sent_at,
-            d.error_message AS draft_error
+            d.error_message AS draft_error,
+            COALESCE(d.validation_status, 'Passed') AS validation_status,
+            COALESCE(d.validation_issues, '[]') AS validation_issues
         FROM umd_ta_ra_contacts c
         LEFT JOIN umd_ta_ra_email_drafts d ON d.id = c.email_draft_id
         ORDER BY c.fit_score DESC, c.updated_at DESC, c.id DESC
@@ -417,6 +428,7 @@ def status_badge(status: str) -> str:
         "enriched": "#7c3aed",
         "send_ready": "#059669",
         "drafted": "#2563eb",
+        "needs_review": "#f59e0b",
         "approved": "#0f766e",
         "queued": "#0f766e",
         "sent": "#16a34a",
@@ -1379,6 +1391,10 @@ def umd_ta_ra_outreach_page() -> None:
             "email",
             "opportunity_type",
             "semester",
+            "personalization_source",
+            "personalization_confidence",
+            "personalization_context",
+            "validation_status",
             "research_or_course_area",
             "fit_score",
             "source_url",
@@ -1394,6 +1410,10 @@ def umd_ta_ra_outreach_page() -> None:
             "email": "Email",
             "opportunity_type": "Opportunity type",
             "semester": "Semester",
+            "personalization_source": "Personalization source",
+            "personalization_confidence": "Confidence",
+            "personalization_context": "Personalization context",
+            "validation_status": "Validation",
             "research_or_course_area": "Course or research area",
             "fit_score": "Fit score",
             "source_url": "Source URL",
@@ -1422,44 +1442,78 @@ def umd_ta_ra_outreach_page() -> None:
         st.markdown(f"**Status:** {status_badge(str(selected['status']))}", unsafe_allow_html=True)
         st.caption(f"Resume attachment: {'enabled' if settings.attach_resume and settings.resume_file.exists() else 'not available'}")
         st.caption(f"Source: {selected['source_url']}")
+        st.write(f"**Personalization source:** {selected.get('personalization_source') or 'Fallback'}")
+        st.write(f"**Personalization confidence:** {selected.get('personalization_confidence') or 'Low'}")
+        st.write(f"**Personalization context:** {selected.get('personalization_context') or 'No clean context available'}")
+        validation_status = str(selected.get("validation_status") or "Passed")
+        validation_issues_raw = selected.get("validation_issues") or "[]"
+        try:
+            validation_issues = json.loads(validation_issues_raw) if isinstance(validation_issues_raw, str) else []
+        except Exception:
+            validation_issues = [str(validation_issues_raw)]
+        if validation_status == "Passed" and not validation_issues:
+            st.success("Validation status: Passed")
+        else:
+            st.warning("Validation status: Needs Review")
+            for issue in validation_issues:
+                st.write(f"- {issue}")
         st.write(f"**Why this contact:** {selected['fit_reason']}")
         st.write(f"**Personalization notes:** {selected['personalization_notes']}")
 
         subject = st.text_input("Subject line", value=str(selected.get("subject") or "MSIS Student Interested in TA/RA or Course Support Opportunities"))
         body = st.text_area("Drafted email body", value=str(selected.get("body") or ""), height=320)
-        action_cols = st.columns(6)
+        action_cols = st.columns(4)
         with action_cols[0]:
             if st.button("Save draft edits"):
-                umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
-                st.success("Draft saved.")
+                status, issues = umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
+                if issues:
+                    st.warning(f"Draft saved but needs review: {'; '.join(issues)}")
+                else:
+                    st.success(f"Draft saved. Validation: {status}.")
                 st.cache_data.clear()
                 st.rerun()
         with action_cols[1]:
             if st.button("Approve draft"):
-                umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
-                umd_ta_ra_workflow.approve_draft(settings, int(selected_id))
-                st.success("Draft approved. It will not send until you explicitly run the UMD sender.")
+                status, issues = umd_ta_ra_workflow.update_draft(settings, int(selected_id), subject, body)
+                if issues:
+                    st.warning(f"Draft needs review before approval: {'; '.join(issues)}")
+                else:
+                    approved, approval_issues = umd_ta_ra_workflow.approve_draft(settings, int(selected_id))
+                    if approved:
+                        st.success("Draft approved. It will not send until you explicitly run the UMD sender.")
+                    else:
+                        st.warning(f"Draft needs review before approval: {'; '.join(approval_issues)}")
                 st.cache_data.clear()
                 st.rerun()
         with action_cols[2]:
+            if st.button("Regenerate clean draft"):
+                status, issues = umd_ta_ra_workflow.regenerate_clean_draft(settings, int(selected_id))
+                if issues:
+                    st.warning(f"Regenerated draft still needs review: {'; '.join(issues)}")
+                else:
+                    st.success(f"Regenerated clean draft. Validation: {status}.")
+                st.cache_data.clear()
+                st.rerun()
+        with action_cols[3]:
             if st.button("Skip contact"):
                 umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "skipped", "Skipped from UMD TA/RA dashboard")
                 st.success("Contact skipped.")
                 st.cache_data.clear()
                 st.rerun()
-        with action_cols[3]:
+        status_cols = st.columns(3)
+        with status_cols[0]:
             if st.button("Mark follow-up needed"):
                 umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "follow_up_needed", "Follow-up needed")
                 st.success("Marked follow-up needed.")
                 st.cache_data.clear()
                 st.rerun()
-        with action_cols[4]:
+        with status_cols[1]:
             if st.button("Mark contacted"):
                 umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "contacted", "Contacted outside the automated sender")
                 st.success("Marked contacted.")
                 st.cache_data.clear()
                 st.rerun()
-        with action_cols[5]:
+        with status_cols[2]:
             if st.button("Not relevant"):
                 umd_ta_ra_workflow.mark_contact_status(settings, int(selected_id), "not_relevant", "Marked not relevant from UMD TA/RA dashboard")
                 st.success("Marked not relevant.")
