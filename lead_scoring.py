@@ -13,8 +13,9 @@ from lead import Lead
 ROLE_KEYWORDS = {
     "recruiter",
     "talent acquisition",
-    "university recruiter",
-    "campus recruiter",
+    "technical recruiter",
+    "early career recruiter",
+    "new grad recruiter",
     "early talent",
     "hr",
     "human resources",
@@ -30,29 +31,39 @@ ROLE_KEYWORDS = {
     "machine learning manager",
     "ai engineering manager",
     "engineering manager",
+    "analytics engineering manager",
+    "bi manager",
+    "ai manager",
+    "ml manager",
+    "technical lead",
+    "data lead",
     "people operations",
 }
 
 HIRING_KEYWORDS = {
-    "data analyst intern",
-    "data scientist intern",
-    "data engineer intern",
-    "business analyst intern",
-    "analytics intern",
-    "bi intern",
-    "data science intern",
-    "ai/ml intern",
-    "ai engineer intern",
-    "ai engineer internship",
-    "ml intern",
-    "machine learning intern",
-    "cloud/data intern",
-    "cloud intern",
-    "consulting intern",
-    "summer 2026",
+    "data analyst",
+    "business analyst",
+    "bi analyst",
+    "product analyst",
+    "data engineer",
+    "analytics engineer",
+    "ai engineer",
+    "machine learning engineer",
+    "junior data scientist",
+    "associate data scientist",
+    "data science analyst",
+    "cloud data engineer",
+    "python sql analyst",
+    "entry-level",
+    "entry level",
+    "new grad",
+    "junior",
+    "associate",
     "early talent",
-    "campus",
-    "internship",
+    "early career",
+    "0-2 years",
+    "full-time",
+    "full time",
 }
 
 INDUSTRY_KEYWORDS = {
@@ -87,6 +98,32 @@ IRRELEVANT_TITLE_KEYWORDS = {
     "revenue",
 }
 
+EXCLUDED_KEYWORDS = {
+    "intern",
+    "internship",
+    "unpaid",
+    "volunteer",
+    "contract only",
+    "contract-only",
+    "principal",
+    "staff engineer",
+    "staff data",
+    "senior director",
+    "vp ",
+    "vice president",
+    "chief ",
+}
+
+SENIOR_ONLY_KEYWORDS = {
+    "senior data analyst",
+    "senior data engineer",
+    "senior machine learning",
+    "senior ai engineer",
+    "lead data engineer",
+    "principal data",
+    "staff data",
+}
+
 
 def _text(*values: str) -> str:
     return " ".join(value.lower() for value in values if value)
@@ -105,8 +142,33 @@ def _parse_company_size(raw_size: str) -> int | None:
     return max(numbers)
 
 
+def disqualifying_reason(lead: Lead) -> str:
+    """Return why a lead should not enter the full-time queue, or blank."""
+
+    combined = _text(
+        lead.title,
+        lead.contact_title,
+        lead.role_title,
+        lead.reason_for_outreach,
+        lead.company_industry,
+        lead.raw_json,
+    )
+    if re.search(r"\bintern(ship)?s?\b", combined):
+        return "Internship wording found in a full-time workflow"
+    if any(keyword in combined for keyword in {"unpaid", "volunteer"}):
+        return "Unpaid or volunteer role signal"
+    if any(keyword in combined for keyword in {"contract only", "contract-only"}):
+        return "Contract-only role signal"
+    if _contains_any(combined, SENIOR_ONLY_KEYWORDS) and not _contains_any(combined, {"junior", "associate", "entry", "new grad", "0-2"}):
+        return "Senior-only role signal"
+    contact_title_text = _text(lead.title, lead.contact_title)
+    if _contains_any(contact_title_text, IRRELEVANT_TITLE_KEYWORDS) and not _contains_any(contact_title_text, ROLE_KEYWORDS):
+        return "Irrelevant sales/marketing-only contact title"
+    return ""
+
+
 def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str]]:
-    """Score a lead from 0 to 100 using the current outreach rubric."""
+    """Score a lead from 0 to 100 using the full-time outreach rubric."""
 
     location_decision = apply_dmv_location(lead)
     industry_text = _text(lead.company_industry, lead.company_name, lead.reason_for_outreach, lead.raw_json)
@@ -117,15 +179,23 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
     target_contact_roles = {item.lower() for item in settings.apollo_job_titles} | ROLE_KEYWORDS
     target_hiring = {item.lower() for item in settings.apollo_target_job_titles} | HIRING_KEYWORDS
 
-    location_fit = 25 if location_decision.is_dmv else 0
+    location_fit = 15 if location_decision.is_dmv else 0
+    if location_decision.remote_dmv_eligible:
+        location_fit = 15
+    elif "city:" in location_decision.location_match or "state:" in location_decision.location_match:
+        location_fit = 15
+    elif "us_hub:" in location_decision.location_match:
+        location_fit = 13
+    elif "apollo_us_full_time_tier:" in location_decision.location_match:
+        location_fit = 10
 
     keyword_fit = 0
     if _contains_any(industry_text, target_industries):
-        keyword_fit = 20
+        keyword_fit = 25
     elif _contains_any(industry_text, {"technology", "finance", "bank", "biotech", "engineering"}):
-        keyword_fit = 14
+        keyword_fit = 18
     elif lead.company_industry:
-        keyword_fit = 8
+        keyword_fit = 10
 
     role_relevance = 0
     if _contains_any(contact_title_text, target_contact_roles):
@@ -153,6 +223,12 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
     elif _contains_any(contact_title_text, {"recruiter", "talent", "hiring"}):
         hiring_signal = 6
 
+    personalization_quality = 0
+    if lead.reason_for_outreach and lead.company_name and lead.company_industry:
+        personalization_quality = 5
+    elif lead.reason_for_outreach or lead.company_name:
+        personalization_quality = 3
+
     email_quality = 0
     if lead.email and lead.email_status.lower() in {"verified", "likely to engage", "likely valid", "valid"}:
         email_quality = 10
@@ -160,8 +236,11 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
         email_quality = 6
 
     penalties = 0
+    disqualified = disqualifying_reason(lead)
+    if disqualified:
+        penalties -= 35
     if not location_decision.is_dmv:
-        penalties -= 20
+        penalties -= 25
     if _contains_any(contact_title_text, IRRELEVANT_TITLE_KEYWORDS) and role_relevance < 14:
         penalties -= 20
     if lead.apollo_used and not lead.email:
@@ -174,9 +253,11 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
         "hiring_signal": hiring_signal,
         "company_size_fit": company_size_fit,
         "email_quality": email_quality,
+        "personalization_quality": personalization_quality,
         "penalties": penalties,
+        "disqualifying_reason": disqualified,
     }
-    total = max(0, min(100, sum(int(value) for value in breakdown.values())))
+    total = max(0, min(100, sum(int(value) for value in breakdown.values() if isinstance(value, int))))
     breakdown["total"] = total
     breakdown["min_score_to_enrich"] = settings.min_score_to_enrich
     breakdown["min_score_to_send"] = settings.min_score_to_send

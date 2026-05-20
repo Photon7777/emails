@@ -1,6 +1,6 @@
 # Python Cold Email Workflow for macOS
 
-This project finds DMV-area and remote recruiter, founder, hiring manager, and company contacts, stores leads locally, renders personalized internship outreach, and sends messages through the Gmail API.
+This project finds U.S.-based, remote, and DMV-preferred recruiter, founder, hiring manager, and data/AI team contacts, stores leads locally, renders personalized full-time job outreach, and sends messages through the Gmail API.
 
 It is designed for a MacBook and a beginner-friendly Python setup. The default config in `.env.example` is safe: `DRY_RUN=true`, so no real outreach is sent until you explicitly switch to live sending.
 
@@ -70,18 +70,18 @@ Generated data, previews, logs, credentials, and OAuth tokens are created locall
 - Uses Python on macOS.
 - Stores the Apollo API key in `.env`.
 - Uses Gmail API OAuth with `credentials.json` and `token.json`.
-- Searches Apollo by job title, DMV/remote location, company size, keywords, and industry/company filters.
-- Filters every candidate to Washington DC, Maryland, Virginia, or remote roles before enrichment or sending.
+- Searches Apollo by hiring/contact title, U.S./remote/DMV-preferred location, company size, keywords, and industry/company filters.
+- Filters every candidate to U.S., remote U.S., DMV, or target-hub locations before enrichment or sending.
 - Scores leads before enrichment and only enriches high-fit net-new leads.
 - Applies a daily Apollo enrichment credit budget.
 - Checks SQLite, CSV export, suppression, do-not-contact, and already-contacted lists before paid enrichment.
 - Stores leads in SQLite and exports CSV.
 - Avoids duplicate contacts by email and Apollo ID.
 - Skips contacts without usable email addresses.
-- Uses tiered Apollo fallback search when strict DMV filters return too few candidates.
+- Uses tiered Apollo fallback search when strict full-time filters return too few candidates.
 - Tracks each lead as `raw`, `rejected`, `enriched`, `send_ready`, `sent`, `failed`, or `skipped`.
 - Records `automation_runs`, `email_events`, and Apollo tier debug logs in SQLite.
-- Includes a local Streamlit dashboard: InternReach AI Dashboard.
+- Includes a local Streamlit dashboard for full-time outreach monitoring.
 - Generates personalized emails using first name, company, role, industry, and company-specific reason.
 - Includes sender identity in every email.
 - Supports resume PDF attachments.
@@ -186,18 +186,18 @@ For the full credit-saving design, schema, pseudocode, and automation plan, see:
 docs/credit_saving_workflow.md
 ```
 
-## DMV Internship Lead Filters
+## Full-Time Job Lead Filters
 
-The current workflow is intended for DMV-only internship outreach plus remote roles. Use these settings in `.env`:
+The main workflow is intended for full-time Data Analyst, Data Engineer, AI Engineer, ML Engineer, BI, analytics, and related early-career roles. It prefers DMV and remote U.S. opportunities, but also allows strong U.S. hubs. Use these settings in `.env`:
 
 ```bash
-APOLLO_FILTER_JOB_TITLES=University Recruiter,Campus Recruiter,Early Talent Recruiter,Technical Recruiter,Recruiter,Talent Acquisition Specialist,Founder,Co-Founder,Hiring Manager,Data Analytics Manager,Data Science Manager,Machine Learning Manager,AI Engineering Manager,Head of Data,Director of Analytics
-APOLLO_TARGET_JOB_TITLES=Data Analyst Intern,Data Scientist Intern,Data Engineer Intern,Business Analyst Intern,Analytics Intern,BI Intern,AI/ML Intern,Cloud/Data Intern
-APOLLO_TARGET_JOB_LOCATIONS=Washington DC,District of Columbia,DC,Maryland,MD,Virginia,VA,Remote
-APOLLO_FILTER_PERSON_LOCATIONS=Washington DC,Maryland,Virginia
-APOLLO_FILTER_LOCATIONS=Washington DC,District of Columbia,Maryland,Virginia,Arlington,Alexandria,Fairfax,Tysons,Reston,Rockville,Bethesda,College Park,Silver Spring,Baltimore,Gaithersburg,Richmond
-APOLLO_FILTER_INDUSTRIES=computer software,financial services,healthcare,analytics
-APOLLO_FILTER_KEYWORDS=summer 2026 internship,data analyst,business analyst,analytics,AI,ML,cloud,data engineering
+APOLLO_FILTER_JOB_TITLES=Technical Recruiter,Recruiter,Talent Acquisition Specialist,Early Career Recruiter,New Grad Recruiter,Founder,Co-Founder,Hiring Manager,Data Analytics Manager,Business Intelligence Manager,Data Engineering Manager,Data Science Manager,Machine Learning Manager,AI Engineering Manager,Analytics Engineering Manager,Head of Data,Director of Analytics,Data Lead,AI Manager,ML Manager
+APOLLO_TARGET_JOB_TITLES=Data Analyst,Business Analyst,BI Analyst,Product Analyst,Data Engineer,Analytics Engineer,AI Engineer,Machine Learning Engineer,Junior Data Scientist,Associate Data Scientist,Data Science Analyst,Cloud Data Engineer,Python SQL Analyst,Entry-Level AI Engineer,New Grad Data Analyst,Early Career Data Engineer
+APOLLO_TARGET_JOB_LOCATIONS=United States,Remote,Remote United States,Washington DC,District of Columbia,DC,Maryland,MD,Virginia,VA,New York,Boston,San Francisco Bay Area,Seattle,Austin,Chicago,Atlanta,Dallas,Denver
+APOLLO_FILTER_PERSON_LOCATIONS=United States,Washington DC,Maryland,Virginia
+APOLLO_FILTER_LOCATIONS=United States,Remote,Remote United States,Washington DC,District of Columbia,Maryland,Virginia,Arlington,Alexandria,Fairfax,Tysons,Reston,Rockville,Bethesda,College Park,Silver Spring,Baltimore,Gaithersburg,Richmond,New York,Boston,San Francisco Bay Area,Seattle,Austin,Chicago,Atlanta,Dallas,Denver
+APOLLO_FILTER_INDUSTRIES=computer software,financial services,healthcare,analytics,artificial intelligence,information technology,consulting,cloud,saas,fintech
+APOLLO_FILTER_KEYWORDS=full-time,data analyst,business analyst,BI analyst,product analyst,data engineer,analytics engineer,AI engineer,machine learning engineer,new grad,entry level,early career,Python,SQL,ETL,data pipelines,dashboards,cloud
 APOLLO_FILTER_COMPANY_SIZE_RANGES=1,10;11,50;51,200;201,500;501,1000;1001,5000;5001,10000;10001,20000
 APOLLO_DAILY_CREDIT_LIMIT=25
 DAILY_ENRICH_LIMIT=25
@@ -211,9 +211,9 @@ DAILY_SEND_TARGET_MIN=25
 PENDING_INVENTORY_TARGET=40
 ```
 
-`APOLLO_FILTER_JOB_TITLES` describes the people to contact. `APOLLO_TARGET_JOB_TITLES` describes the internship/job roles you are looking for at their companies.
+`APOLLO_FILTER_JOB_TITLES` describes the people to contact. `APOLLO_TARGET_JOB_TITLES` describes the full-time roles you are looking for at their companies.
 
-Local DMV filtering also normalizes common variants such as `DC`, `District of Columbia`, `MD`, `Maryland`, `VA`, `Virginia`, `Arlington`, `Alexandria`, `Fairfax`, `Tysons`, `Reston`, `Rockville`, `Bethesda`, `College Park`, `Silver Spring`, `Baltimore`, `Gaithersburg`, and `Richmond`. Non-DMV leads are skipped before Apollo enrichment and before Gmail sending.
+Local location filtering normalizes common DMV variants plus U.S. hubs such as New York, Boston, San Francisco Bay Area, Seattle, Austin, Chicago, Atlanta, Dallas, and Denver. Non-U.S. and non-target leads are skipped before Apollo enrichment and before Gmail sending.
 
 Company size ranges use semicolons because each Apollo range contains a comma.
 
@@ -228,14 +228,14 @@ That calls Apollo Organization Search first, then searches people at matching co
 Credit-saving rules:
 
 - Apollo enrichment happens only after duplicate checks and scoring.
-- Apollo enrichment is allowed only for DMV or remote-eligible leads.
+- Apollo enrichment is allowed only for U.S., remote U.S., DMV, or target-hub leads.
 - Companies already sent, rejected, bounced, unsubscribed, or marked not relevant are skipped.
 - Work-email domains must match the company domain before sending.
 - The sender only sends `send_ready` leads with emails.
 - Run `python main.py rescore` after changing scoring rules to clean an older queue.
 - `raw` can mean the lead passed early checks but enrichment was deferred by the daily credit budget.
 - `rejected` records why a lead was held back, such as low score or missing email after enrichment.
-- The morning sender is tuned for 25-30 emails/day when enough qualified DMV leads are send-ready. It will not bypass DMV, duplicate, score, suppression, or email-domain checks just to hit the target.
+- The morning sender is tuned for 25-30 emails/day when enough qualified full-time leads are send-ready. It will not bypass location, duplicate, score, suppression, full-time wording, or email-domain checks just to hit the target.
 
 ## Resume Attachment
 
@@ -256,7 +256,7 @@ The template lives here:
 templates/internship_outreach.txt
 ```
 
-It is written for data analytics, data science, data engineering, and AI internship/job outreach.
+It is written for full-time data analytics, data science, data engineering, and AI job outreach.
 
 Available placeholders:
 
@@ -286,9 +286,9 @@ The code automatically appends sender identity to every email.
 
 Discovery runs four Apollo search tiers and stops once enough unique candidates are found:
 
-1. Strict DMV + remote internship wording.
-2. DMV companies with broader data, AI, BI, Python, SQL, cloud, and automation signals.
-3. Remote U.S. internships with the same internship/data/AI keyword set.
+1. DMV plus remote U.S. full-time data, analytics, and AI roles.
+2. U.S. and remote companies with broader data, AI, BI, Python, SQL, cloud, ETL, and automation signals.
+3. Remote U.S. full-time roles with the same data/AI keyword set.
 4. Company-first warm search for fintech, healthcare tech, SaaS, AI, consulting, analytics, edtech, and cloud companies.
 
 Apollo enrichment is never automatic for every search result. The workflow first dedupes locally, checks blocklists and company weekly limits, scores the raw lead, and only enriches missing emails when `score >= MIN_SCORE_TO_ENRICH`.
@@ -316,11 +316,11 @@ Only Apollo actions that are expected to consume credits are logged as credit us
 
 The project also includes a separate **UMD TA/RA Outreach** workflow for Teaching Assistant, Research Assistant, Grader, Course Support, Lab Assistant, and Faculty Assistant opportunities at the University of Maryland, College Park.
 
-This workflow is intentionally separate from the internship Apollo workflow:
+This workflow is intentionally separate from the main Apollo full-time workflow:
 
 - It uses separate tables: `umd_ta_ra_contacts`, `umd_ta_ra_email_drafts`, `umd_ta_ra_outreach_logs`, and `umd_ta_ra_workflow_runs`.
 - It does not use Apollo credits.
-- It does not touch `leads`, `send_queue`, or the 8:00 AM internship sender.
+- It does not touch `leads`, `send_queue`, or the 8:00 AM main sender.
 - It drafts emails for review and requires manual approval before anything can be sent.
 
 Configuration:

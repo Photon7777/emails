@@ -52,6 +52,17 @@ DIRECTORY_DUMP_RE = re.compile(
     r"\bcontact\b.*\b(phone|email|office)\b",
     re.IGNORECASE,
 )
+NAVIGATION_PHRASE_RE = re.compile(
+    r"\b(?:FAQ|Study Abroad|Scholarships|Academic and Wellness Resources|Career Services|"
+    r"Commencement|Student Organizations|Offerings Degree Programs|Admissions|Apply Now|"
+    r"Prospective Students|Current Students|News Events|Give to|Directory Search)\b",
+    re.IGNORECASE,
+)
+BAD_GREETING_TOKEN_RE = re.compile(
+    r"^(?:Associate|Assistant|Clinical|Adjunct|Visiting|Distinguished|University|"
+    r"Professor|Lecturer|Instructor|Faculty|Director|Coordinator|Staff|School|College)$",
+    re.IGNORECASE,
+)
 
 SEARCH_QUERIES = [
     "site:umd.edu teaching assistant",
@@ -288,6 +299,8 @@ def clean_personalization_text(raw_text: str, *, max_words: int = 15, allow_long
     original = _clean_text(raw_text)
     if not original:
         return None
+    if NAVIGATION_PHRASE_RE.search(original):
+        return None
     original_metadata_hits = sum(
         1
         for pattern in (ANY_EMAIL_RE, PHONE_RE, OFFICE_RE, LABEL_RE)
@@ -314,6 +327,8 @@ def clean_personalization_text(raw_text: str, *, max_words: int = 15, allow_long
     if BUILDING_WORD_RE.search(text):
         return None
     if DIRECTORY_DUMP_RE.search(original) or DIRECTORY_DUMP_RE.search(text):
+        return None
+    if NAVIGATION_PHRASE_RE.search(text):
         return None
     if re.search(r"\b\d{3,5}\b", text):
         return None
@@ -861,16 +876,38 @@ def _apply_personalization(contact: UmdContact) -> None:
 
 
 def _last_name(name: str) -> str:
-    pieces = [piece for piece in re.split(r"\s+", name or "") if piece]
-    return pieces[-1] if pieces and name != "UMD Faculty or Staff" else ""
+    cleaned = _clean_text(name).strip(" ,")
+    if not cleaned or cleaned == "UMD Faculty or Staff":
+        return ""
+    if "," in cleaned:
+        candidate = cleaned.split(",", 1)[0]
+    else:
+        pieces = [piece for piece in re.split(r"\s+", cleaned) if piece]
+        candidate = pieces[-1] if pieces else ""
+    candidate = re.sub(r"[^A-Za-z'-]", "", candidate).strip("-'")
+    if not candidate or len(candidate) < 2 or BAD_GREETING_TOKEN_RE.search(candidate):
+        return ""
+    return candidate
+
+
+def _has_safe_contact_name(name: str) -> bool:
+    cleaned = _clean_text(name).strip(" ,")
+    if not cleaned or cleaned == "UMD Faculty or Staff":
+        return False
+    if any(BAD_GREETING_TOKEN_RE.search(part.strip()) for part in re.split(r"\s+", cleaned)):
+        return False
+    return bool(re.search(r"[A-Za-z]{2,}", cleaned))
 
 
 def render_umd_email(contact: UmdContact, settings: Settings) -> tuple[str, str]:
     _apply_personalization(contact)
     last = _last_name(contact.name)
     is_professor = "professor" in (contact.title or "").lower()
-    greeting = f"Dear Professor {last}," if last and is_professor else f"Dear {contact.name},"
-    if contact.name == "UMD Faculty or Staff":
+    if last and is_professor:
+        greeting = f"Dear Professor {last},"
+    elif _has_safe_contact_name(contact.name):
+        greeting = f"Dear {contact.name},"
+    else:
         greeting = "Hello,"
 
     context = contact.personalization_context
@@ -952,6 +989,14 @@ def validate_umd_draft(subject: str, body: str, settings: Settings | None = None
         issues.append('Body contains directory label "Contact".')
     if DIRECTORY_DUMP_RE.search(body_for_email_check):
         issues.append("Body contains a phrase that looks like copied faculty directory metadata.")
+    if NAVIGATION_PHRASE_RE.search(body_for_email_check):
+        issues.append("Body contains website navigation text.")
+    if re.search(
+        r"^Dear\s+Professor\s+(?:Associate|Assistant|Distinguished|University|Professor|Lecturer|Faculty|Director|Coordinator),",
+        body_for_email_check,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        issues.append("Greeting appears to use a title or metadata instead of a name.")
 
     personalization_phrase = _extract_personalization_phrase(body_for_email_check)
     if personalization_phrase:
@@ -1244,7 +1289,7 @@ def create_or_update_draft(conn, contact_id: int, contact: UmdContact, settings:
     ).fetchone()
     if existing:
         draft_id = int(existing["id"])
-        if existing["status"] not in {"approved", "sent"}:
+        if existing["status"] != "sent":
             conn.execute(
                 """
                 UPDATE umd_ta_ra_email_drafts

@@ -379,7 +379,7 @@ def get_lead_row(lead_id: int):
 
 
 def mark_manual_skip(lead_id: int, note: str) -> None:
-    reason = note.strip() or "Manually skipped in Daily Discovery Review"
+    reason = note.strip() or "Manually skipped in Daily Full-Time Review"
     now = utc_now_iso()
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
@@ -413,7 +413,7 @@ def mark_manual_skip(lead_id: int, note: str) -> None:
 
 
 def remove_from_queue(lead_id: int, note: str) -> None:
-    reason = note.strip() or "Removed from 8 AM queue in Daily Discovery Review"
+    reason = note.strip() or "Removed from 8 AM queue in Daily Full-Time Review"
     now = utc_now_iso()
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
@@ -511,8 +511,8 @@ def classify_rejection(row: pd.Series) -> str:
         return "Missing email"
     if "duplicate" in reason or status == "duplicate":
         return "Duplicate"
-    if "outside dmv" in reason or "outside" in reason or "non-dmv" in reason:
-        return "Outside DMV and not remote"
+    if "outside" in reason or "non-dmv" in reason:
+        return "Outside target location"
     if "irrelevant" in reason or "sales" in title:
         return "Irrelevant title"
     if "weekly contact limit" in reason:
@@ -527,7 +527,7 @@ def classify_rejection(row: pd.Series) -> str:
 
 
 def setup_page() -> None:
-    st.set_page_config(page_title="InternReach AI Dashboard", layout="wide")
+    st.set_page_config(page_title="Full-Time Job Outreach Dashboard", layout="wide")
     st.markdown(
         """
         <style>
@@ -618,7 +618,7 @@ def setup_page() -> None:
 
 
 def daily_discovery_review() -> None:
-    st.header("Daily Discovery Review")
+    st.header("Daily Full-Time Discovery Review")
     selected_date = st.date_input("Discovery date", value=date.today())
     latest_run_df = load_latest_discovery_run(selected_date)
     latest_run = latest_run_df.iloc[0] if not latest_run_df.empty else None
@@ -627,12 +627,12 @@ def daily_discovery_review() -> None:
     search_logs = load_discovery_search_logs(run_id)
 
     if settings.dry_run:
-        st.warning("DRY_RUN is active. The 8 AM sender will not send live emails.")
+        st.warning("DRY_RUN is active. The 8 AM full-time sender will not send live emails.")
     else:
-        st.error("Live sending is enabled. Review the queued table carefully before 8:00 AM.")
+        st.error("Live full-time sending is enabled. Review the queued table carefully before 8:00 AM.")
 
     if leads.empty:
-        st.info("No contacts were found for this date yet. After nightly discovery runs, this page will populate automatically.")
+        st.info("No full-time contacts were found for this date yet. After nightly discovery runs, this page will populate automatically.")
         if st.button("Refresh dashboard data"):
             st.cache_data.clear()
             st.rerun()
@@ -655,7 +655,7 @@ def daily_discovery_review() -> None:
     ].copy()
 
     if not queued.empty and not settings.dry_run:
-        st.warning(f"{len(queued)} contact(s) are queued for live sending at 8:00 AM.")
+        st.warning(f"{len(queued)} full-time contact(s) are queued for live sending at 8:00 AM.")
 
     rejected = leads[leads["status"].isin(["rejected", "skipped", "failed"]) | (leads["review_status"] == "missing_email")]
     missing_email = int((~leads["has_email"]).sum())
@@ -666,10 +666,10 @@ def daily_discovery_review() -> None:
 
     cols = st.columns(8)
     metrics = [
-        ("Raw contacts found", raw_contacts),
+        ("Full-time contacts found", raw_contacts),
         ("Contacts scored", scored_count),
         ("Contacts enriched", enriched_count),
-        ("Send-ready contacts", int(leads["status"].isin(["send_ready", "queued"]).sum())),
+        ("Full-time send-ready", int(leads["status"].isin(["send_ready", "queued"]).sum())),
         ("Queued for 8:00 AM", len(queued)),
         ("Rejected/skipped", len(rejected)),
         ("Missing emails", missing_email),
@@ -680,11 +680,11 @@ def daily_discovery_review() -> None:
             metric_card(label, value)
 
     tab_found, tab_queued, tab_rejected, tab_run = st.tabs(
-        ["Found Today", "Queued for 8AM", "Rejected/Skipped", "Run Details"]
+        ["Full-Time Leads", "Queued for 8AM", "Rejected/Skipped", "Run Details"]
     )
 
     with tab_found:
-        st.subheader("Contacts Found Today")
+        st.subheader("Full-Time Contacts Found Today")
         f1, f2, f3, f4 = st.columns(4)
         with f1:
             status_filter = st.multiselect("Status", sorted(leads["review_status"].dropna().unique().tolist()))
@@ -791,9 +791,9 @@ def daily_discovery_review() -> None:
             st.info("No visible leads match the current filters.")
 
     with tab_queued:
-        st.subheader("Emails Queued for 8:00 AM")
+        st.subheader("Full-Time Emails Queued for 8:00 AM")
         if queued.empty:
-            st.info("No contacts queued for 8:00 AM yet.")
+            st.info("No full-time contacts queued for 8:00 AM yet.")
         else:
             queued["scheduled_send_time"] = queued["scheduled_send_time"].fillna(queued["queued_send_time"])
             queued_table = queued[
@@ -849,7 +849,7 @@ def daily_discovery_review() -> None:
                 )
                 st.write("Why selected")
                 st.info(
-                    f"Score {selected.score} met the send threshold of {settings.min_score_to_send}; "
+                    f"Full-time score {selected.score} met the send threshold of {settings.min_score_to_send}; "
                     f"email exists; queue status is {selected.queue_status}; search tier is {selected.search_tier or 'unknown'}."
                 )
                 try:
@@ -949,11 +949,11 @@ def overview() -> None:
 
     cols = st.columns(8)
     with cols[0]:
-        metric_card("Discovered Today", int(today_runs["raw_candidates"]))
+        metric_card("Full-Time Found", int(today_runs["raw_candidates"]))
     with cols[1]:
         metric_card("Enriched Today", int(today_runs["enriched_count"]))
     with cols[2]:
-        metric_card("Send-Ready", send_ready)
+        metric_card("Full-Time Ready", send_ready)
     with cols[3]:
         metric_card("Sent Today", sent_today)
     with cols[4]:
@@ -988,25 +988,25 @@ def overview() -> None:
                 ORDER BY day
                 """
             )
-            st.plotly_chart(px.bar(daily, x="day", y="sent", title="Daily Emails Sent"), use_container_width=True)
+            st.plotly_chart(px.bar(daily, x="day", y="sent", title="Daily Full-Time Emails Sent"), use_container_width=True)
     with right:
         if leads.empty:
-            st.info("No leads in the database yet.")
+            st.info("No full-time leads in the database yet.")
         else:
             by_status = leads.groupby("status", dropna=False).size().reset_index(name="count")
-            st.plotly_chart(px.pie(by_status, values="count", names="status", title="Leads by Status"), use_container_width=True)
+            st.plotly_chart(px.pie(by_status, values="count", names="status", title="Full-Time Leads by Status"), use_container_width=True)
 
 
 def lead_pipeline() -> None:
     leads = load_leads()
     if leads.empty:
-        st.info("No leads yet. Run discovery to populate the pipeline.")
+        st.info("No full-time leads yet. Run full-time discovery to populate the pipeline.")
         return
     stages = ["raw", "rejected", "enriched", "send_ready", "sent"]
     counts = []
     for status in stages:
         counts.append({"stage": status, "count": int((leads["status"] == status).sum())})
-    st.plotly_chart(px.funnel(pd.DataFrame(counts), x="count", y="stage", title="Lead Funnel"), use_container_width=True)
+    st.plotly_chart(px.funnel(pd.DataFrame(counts), x="count", y="stage", title="Full-Time Lead Funnel"), use_container_width=True)
 
     st.subheader("Filters")
     c1, c2, c3, c4 = st.columns(4)
@@ -1033,9 +1033,9 @@ def lead_pipeline() -> None:
 def lead_table() -> None:
     leads = load_leads()
     if leads.empty:
-        st.info("No leads yet.")
+        st.info("No full-time leads yet.")
         return
-    query = st.text_input("Search leads")
+    query = st.text_input("Search full-time leads")
     filtered = leads
     if query:
         haystack = filtered.fillna("").astype(str).agg(" ".join, axis=1)
@@ -1110,13 +1110,13 @@ def automation_runs() -> None:
 def apollo_debugger() -> None:
     logs = load_search_logs()
     if logs.empty:
-        st.info("No Apollo search logs yet. Run discovery to see tier performance.")
+        st.info("No Apollo search logs yet. Run full-time discovery to see tier performance.")
         return
     tier_perf = logs.groupby(["tier_name", "search_type"], dropna=False).agg(
         result_count=("result_count", "sum"),
         new_unique_count=("new_unique_count", "sum"),
     ).reset_index()
-    st.plotly_chart(px.bar(tier_perf, x="tier_name", y="result_count", color="search_type", title="Apollo Search Tier Performance"), use_container_width=True)
+    st.plotly_chart(px.bar(tier_perf, x="tier_name", y="result_count", color="search_type", title="Full-Time Apollo Search Tier Performance"), use_container_width=True)
     saved = int((logs["result_count"] - logs["new_unique_count"]).clip(lower=0).sum())
     st.success(f"Estimated Apollo enrichments avoided through dedupe/low-fit filtering: {saved}")
     st.dataframe(logs[["started_at", "tier_name", "search_type", "page", "result_count", "new_unique_count", "notes"]], use_container_width=True, hide_index=True)
@@ -1367,7 +1367,7 @@ def apollo_credits_page() -> None:
 def umd_ta_ra_outreach_page() -> None:
     st.header("UMD TA/RA Outreach")
     st.caption("Separate workflow for UMD teaching assistant, research assistant, grader, course support, lab assistant, and faculty assistant outreach.")
-    st.info("This workflow uses separate UMD tables and does not touch the internship Apollo workflow or the 8:00 AM internship sender.")
+    st.info("This workflow uses separate UMD tables and does not touch the main Apollo full-time workflow or the 8:00 AM sender.")
 
     contacts = load_umd_ta_ra_contacts()
     runs = load_umd_ta_ra_runs()
@@ -1878,36 +1878,36 @@ def umd_ta_ra_outreach_page() -> None:
 
 
 setup_page()
-st.title("InternReach AI Dashboard")
-st.caption("Local monitoring for Apollo discovery, Gmail readiness, and automation health.")
+st.title("Full-Time Job Outreach Dashboard")
+st.caption("Local monitoring for Apollo full-time discovery, Gmail readiness, and automation health.")
 
 page = st.sidebar.radio(
     "Navigation",
     [
         "Overview",
-        "Daily Review",
+        "Full-Time Review",
         "Credits",
         "UMD TA/RA Outreach",
-        "Lead Pipeline",
-        "Lead Table",
+        "Full-Time Pipeline",
+        "Full-Time Lead Table",
         "Errors & Failures",
         "Automation Runs",
-        "Apollo Search Debugger",
+        "Full-Time Search Debugger",
     ],
 )
 
 with st.spinner("Loading workflow data..."):
     if page == "Overview":
         overview()
-    elif page == "Daily Review":
+    elif page == "Full-Time Review":
         daily_discovery_review()
     elif page == "Credits":
         apollo_credits_page()
     elif page == "UMD TA/RA Outreach":
         umd_ta_ra_outreach_page()
-    elif page == "Lead Pipeline":
+    elif page == "Full-Time Pipeline":
         lead_pipeline()
-    elif page == "Lead Table":
+    elif page == "Full-Time Lead Table":
         lead_table()
     elif page == "Errors & Failures":
         errors_failures()

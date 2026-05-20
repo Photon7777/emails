@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from config import Settings
 from lead import Lead
 
@@ -30,15 +32,15 @@ def _company_fit_area(industry: str) -> str:
     rules = [
         (
             ("financial", "insurance", "bank", "accounting", "fintech"),
-            "risk analytics, reporting automation, forecasting, and data quality workflows",
+            "risk analytics, reporting, forecasting, and data quality",
         ),
         (
             ("health", "medical", "hospital", "clinical", "laboratory", "pharma", "biotech"),
-            "healthcare analytics, operational reporting, predictive modeling, and reliable data pipelines",
+            "healthcare analytics, reporting, modeling, and data pipelines",
         ),
         (
             ("software", "information technology", "computer", "internet", "network security", "cybersecurity"),
-            "product analytics, ML-enabled workflows, AI applications, and scalable data platforms",
+            "product analytics, AI workflows, and data platforms",
         ),
         (
             ("staffing", "recruiting", "human resources"),
@@ -65,19 +67,22 @@ def _company_fit_area(industry: str) -> str:
     for keywords, fit_area in rules:
         if any(keyword in normalized for keyword in keywords):
             return fit_area
-    return "analytics, automation, machine learning, and data-informed decision making"
+    return "analytics, automation, ML, and data workflows"
 
 
 def _role_angle(role: str) -> str:
     normalized = role.lower()
+    readable_role = role if len(role) <= 70 else ""
     if any(keyword in normalized for keyword in ("recruit", "talent", "people", "human resources")):
-        return "Your recruiting focus made you seem like a good person to ask about data and AI internship opportunities."
+        return "Your recruiting focus made you seem like a good person to ask about full-time data and AI roles."
     if any(keyword in normalized for keyword in ("data", "analytics", "science", "machine learning", "ml", "ai")):
-        return f"Your {role} role stood out because it is close to the kind of analytics, ML, and data engineering work I hope to contribute to."
+        if readable_role:
+            return f"Your {readable_role} role looked close to the data and AI work I hope to support."
+        return "Your work looked close to the data and AI work I hope to support."
     if any(keyword in normalized for keyword in ("founder", "co-founder", "owner")):
-        return "Your leadership role made you seem like someone who would know where a data-focused intern could be useful."
+        return "Your leadership role made you seem like someone who would know where a data-focused early-career candidate could be useful."
     if any(keyword in normalized for keyword in ("manager", "director", "head", "lead")):
-        return f"Your {role} role made you seem close to teams where data and AI interns could add practical support."
+        return f"Your {role} role made you seem close to teams where data and AI skills could add practical support."
     return "Your role looked connected to hiring or team growth, so I wanted to reach out thoughtfully."
 
 
@@ -89,15 +94,13 @@ def _company_specific_reason(lead: Lead) -> tuple[str, str]:
     location = ", ".join(part for part in [lead.city, lead.state] if part)
 
     if lead.remote_dmv_eligible:
-        location_text = " I also noticed the role appears remote-friendly, which fits my DMV-focused search."
+        location_text = " The remote signal also fit my search."
     elif location:
-        location_text = f" I also noticed the contact location listed as {location}, which fits my DMV-focused search."
+        location_text = f" I also noticed the contact location listed as {location}."
     else:
         location_text = ""
-    reason = (
-        f"What stood out about {company_name} is the connection between its work in {industry} "
-        f"and my background in {fit_area}. {_role_angle(role)}{location_text}"
-    )
+    industry_text = industry if industry and industry != "your industry" else "data-relevant work"
+    reason = f"{company_name}'s work in {industry_text} connects with my background in {fit_area}. {_role_angle(role)}{location_text}"
     return reason, fit_area
 
 
@@ -154,3 +157,21 @@ def render_email(lead: Lead, settings: Settings) -> tuple[str, str]:
         body = body + "\n\n" + "\n\n".join(footer_parts)
 
     return subject, body
+
+
+def validate_full_time_email(subject: str, body: str) -> list[str]:
+    """Return safety issues that should keep a full-time email from sending."""
+
+    issues = []
+    combined = f"{subject}\n{body}".lower()
+    if re.search(r"\bintern(ship)?s?\b", combined):
+        issues.append("Email contains internship wording.")
+    if "unsubscribe" in combined:
+        issues.append("Email contains unsubscribe wording, which is disabled for this workflow.")
+    if _word_count(body) > 180:
+        issues.append("Email is longer than the 180-word target.")
+    return issues
+
+
+def _word_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9]+", value or ""))

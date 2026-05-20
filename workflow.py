@@ -19,10 +19,10 @@ from config import (
 import credits_service
 import db
 from dmv_location import apply_dmv_location
-from email_template import render_email
+from email_template import render_email, validate_full_time_email
 from gmail_client import GmailClient
 from lead import Lead
-from lead_scoring import breakdown_json, score_lead
+from lead_scoring import breakdown_json, disqualifying_reason, score_lead
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ class ColdEmailWorkflow:
             "skipped_duplicate": 0,
             "skipped_blocklist": 0,
             "skipped_company_limit": 0,
+            "skipped_not_full_time": 0,
             "rejected_low_score": 0,
             "rejected_below_send_score": 0,
             "queued_existing": 0,
@@ -124,18 +125,29 @@ class ColdEmailWorkflow:
                     if not self._lead_is_allowed_by_location(lead):
                         counts["skipped_non_dmv"] += 1
                         lead.status = "skipped"
-                        lead.rejection_reason = "Outside DMV and not remote"
+                        lead.rejection_reason = "Outside U.S., remote U.S., DMV, or target hub filters"
                         lead.error_message = lead.rejection_reason
                         action = db.upsert_lead(conn, lead)
                         counts[action] += 1
                         logger.info(
-                            "Skipping non-DMV/non-remote lead before enrichment: %s at %s (%s)",
+                            "Skipping outside-location lead before enrichment: %s at %s (%s)",
                             lead.full_name or lead.first_name or "unknown",
                             lead.company_name or "unknown company",
                             lead.location_match or lead.country or "unknown location",
                         )
                         continue
                     lead.refresh_normalized_fields()
+
+                    not_full_time_reason = disqualifying_reason(lead)
+                    if not_full_time_reason:
+                        counts["skipped_not_full_time"] += 1
+                        lead.status = "skipped"
+                        lead.rejection_reason = not_full_time_reason
+                        lead.error_message = lead.rejection_reason
+                        lead.notes = "Skipped before enrichment because this workflow targets full-time roles only"
+                        action = db.upsert_lead(conn, lead)
+                        counts[action] += 1
+                        continue
 
                     if db.lead_matches_blocklist(lead, block_items):
                         counts["skipped_blocklist"] += 1
@@ -182,7 +194,7 @@ class ColdEmailWorkflow:
                     existing_row = db.find_existing_lead(conn, lead)
                     if existing_row:
                         if self._should_retry_existing_lead(existing_row, lead):
-                            lead.notes = f"Retrying previously location-skipped row {existing_row['id']} after DMV tier match"
+                            lead.notes = f"Retrying previously location-skipped row {existing_row['id']} after full-time tier match"
                         else:
                             counts["skipped_duplicate"] += 1
                             lead.notes = f"Duplicate local person row {existing_row['id']}; not enriched to save Apollo credits"
@@ -273,7 +285,7 @@ class ColdEmailWorkflow:
                     if not self._lead_is_allowed_by_location(lead):
                         counts["skipped_non_dmv"] += 1
                         logger.info(
-                            "Skipping non-DMV/non-remote lead after enrichment: %s at %s (%s)",
+                            "Skipping outside-location lead after enrichment: %s at %s (%s)",
                             lead.full_name or lead.first_name or "unknown",
                             lead.company_name or "unknown company",
                             lead.location_match or lead.country or "unknown location",
@@ -311,6 +323,14 @@ class ColdEmailWorkflow:
                     counts[action] += 1
                     if lead.status == "send_ready":
                         subject, body = render_email(lead, settings)
+                        email_issues = validate_full_time_email(subject, body)
+                        if email_issues:
+                            lead.status = "skipped"
+                            lead.rejection_reason = "; ".join(email_issues)
+                            lead.error_message = lead.rejection_reason
+                            db.upsert_lead(conn, lead)
+                            counts["skipped_not_full_time"] += 1
+                            continue
                         queued_lead_id = db.queue_lead_for_send(
                             conn,
                             lead,
@@ -351,7 +371,7 @@ class ColdEmailWorkflow:
         logger.info(
             "Lead fetch complete: %s searched, %s inserted, %s updated, %s send-ready, "
             "%s enriched, %s Apollo credits used, %s budget hits, %s rejected low score, "
-            "%s duplicates, %s blocklist, %s company-limit, %s missing email, %s non-DMV/non-remote.",
+            "%s duplicates, %s blocklist, %s company-limit, %s missing email, %s outside-location.",
             counts["searched"],
             counts["inserted"],
             counts["updated"],
@@ -464,8 +484,8 @@ class ColdEmailWorkflow:
                     and len(pending_rows) < self.settings.daily_send_target_min
                 ):
                     logger.warning(
-                        "Only %s send-ready DMV leads are available; daily target is %s. "
-                        "Discovery needs more qualified leads before the sender can hit the target.",
+                        "Only %s send-ready full-time leads are available; daily target is %s. "
+                        "Discovery needs more qualified full-time leads before the sender can hit the target.",
                         len(pending_rows),
                         self.settings.daily_send_target_min,
                     )
@@ -534,10 +554,18 @@ class ColdEmailWorkflow:
                         continue
 
                     if not self._lead_is_allowed_by_location(lead):
-                        reason = "Lead is outside the DMV/remote target area"
+                        reason = "Lead is outside the U.S./remote/DMV/target-hub full-time area"
                         db.mark_skipped(conn, lead_id, reason)
                         db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
                         db.record_email_event(conn, lead_id, "skipped", error_message=reason)
+                        counts["skipped"] += 1
+                        continue
+
+                    not_full_time_reason = disqualifying_reason(lead)
+                    if not_full_time_reason:
+                        db.mark_skipped(conn, lead_id, not_full_time_reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", not_full_time_reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", error_message=not_full_time_reason)
                         counts["skipped"] += 1
                         continue
 
@@ -558,6 +586,14 @@ class ColdEmailWorkflow:
                         continue
 
                     subject, body = render_email(lead, self.settings)
+                    email_issues = validate_full_time_email(subject, body)
+                    if email_issues:
+                        reason = "; ".join(email_issues)
+                        db.mark_skipped(conn, lead_id, reason)
+                        db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
+                        db.record_email_event(conn, lead_id, "skipped", subject=subject, error_message=reason)
+                        counts["skipped"] += 1
+                        continue
 
                     if dry_run:
                         logger.info(
@@ -671,10 +707,24 @@ class ColdEmailWorkflow:
                         score,
                         score_json,
                         status="skipped",
-                        error_message="Outside DMV/remote internship target area during rescore",
+                        error_message="Outside U.S./remote/DMV/target-hub full-time target area during rescore",
                         notes="Removed from pending queue before send",
                     )
                     counts["non_dmv"] += 1
+                    continue
+
+                not_full_time_reason = disqualifying_reason(lead)
+                if not_full_time_reason:
+                    db.update_lead_quality(
+                        conn,
+                        row["id"],
+                        score,
+                        score_json,
+                        status="skipped",
+                        error_message=not_full_time_reason,
+                        notes="Removed from pending queue because this workflow targets full-time roles only",
+                    )
+                    counts["blocked"] += 1
                     continue
 
                 if db.lead_matches_blocklist(lead, block_items):
@@ -818,6 +868,8 @@ class ColdEmailWorkflow:
             apply_dmv_location(lead)
             if not self._lead_is_allowed_by_location(lead):
                 continue
+            if disqualifying_reason(lead):
+                continue
             if db.lead_matches_blocklist(lead, block_items):
                 continue
             if db.email_already_sent(conn, lead.email_lower, int(row["id"])):
@@ -844,6 +896,8 @@ class ColdEmailWorkflow:
                 notes="Queued from existing vetted inventory without Apollo enrichment",
             )
             subject, body = render_email(lead, self.settings)
+            if validate_full_time_email(subject, body):
+                continue
             if db.queue_lead_for_send(conn, lead, scheduled_send_time, subject, body):
                 queued += 1
 
@@ -876,6 +930,10 @@ class ColdEmailWorkflow:
             "tier_1_strict_dmv_remote",
             "tier_2_dmv_broader_roles",
             "tier_3_remote_us_internships",
+            "tier_1_dmv_remote_full_time",
+            "tier_2_us_remote_broader_roles",
+            "tier_3_remote_us_full_time",
+            "tier_4_warm_company_search",
         }
         return was_location_skipped and is_trusted_location_tier and self._lead_is_allowed_by_location(lead)
 
@@ -951,7 +1009,7 @@ class ColdEmailWorkflow:
                 "Apollo enrichment credits today: "
                 f"{apollo_credits_today}/{self.settings.apollo_daily_credit_limit}"
             )
-        print(f"Send-ready DMV pending leads: {send_ready_pending}")
+        print(f"Send-ready full-time pending leads: {send_ready_pending}")
         if self.settings.daily_send_target_min > 0:
             print(f"Daily send target: {self.settings.daily_send_target_min}-{self.settings.daily_send_limit}")
         if self.settings.pending_inventory_target > 0:

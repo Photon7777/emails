@@ -204,7 +204,7 @@ def load_settings() -> Settings:
         resume_file=_path_from_env("RESUME_FILE", ""),
         email_subject=_get_str(
             "EMAIL_SUBJECT",
-            "Interest in data internship opportunities at {company_name}",
+            "Full-time data / AI role interest at {company_name}",
         ),
         email_template_path=_path_from_env("EMAIL_TEMPLATE_PATH", "templates/internship_outreach.txt"),
         unsubscribe_text=_get_str(
