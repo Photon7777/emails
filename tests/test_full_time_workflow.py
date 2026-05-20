@@ -4,6 +4,7 @@ from lead import Lead
 from lead_scoring import disqualifying_reason, score_lead
 from config import load_settings
 from email_template import render_email, validate_full_time_email
+from workflow import ColdEmailWorkflow
 
 
 class FullTimeWorkflowTests(unittest.TestCase):
@@ -57,6 +58,33 @@ class FullTimeWorkflowTests(unittest.TestCase):
         score, _ = score_lead(lead, settings)
 
         self.assertGreaterEqual(score, settings.min_score_to_send)
+
+    def test_budget_deferred_raw_lead_can_retry_enrichment(self):
+        settings = load_settings()
+        workflow = ColdEmailWorkflow(settings)
+        lead = Lead(
+            full_name="Alex Rivera",
+            title="Technical Recruiter",
+            role_title="Data Engineer",
+            company_name="Example Data",
+            country="United States",
+            source_tier="tier_2_us_remote_broader_roles",
+        )
+        existing_row = {
+            "email": "",
+            "email_lower": "",
+            "email_sent": 0,
+            "bounced": 0,
+            "manually_skipped": 0,
+            "apollo_used": 0,
+            "status": "raw",
+            "rejection_reason": "Apollo daily enrichment budget reached (3/3)",
+            "location_match": "remote_us",
+            "search_tier": "tier_2_us_remote_broader_roles",
+            "source_tier": "tier_2_us_remote_broader_roles",
+        }
+
+        self.assertTrue(workflow._should_retry_existing_lead(existing_row, lead))
 
 
 if __name__ == "__main__":

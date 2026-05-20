@@ -915,6 +915,22 @@ class ColdEmailWorkflow:
         rejection_reason = (existing_row["rejection_reason"] or "").lower()
         location_match = (existing_row["location_match"] or "").lower()
         source_tier = (lead.search_tier or lead.source_tier or existing_row["search_tier"] or existing_row["source_tier"] or "").lower()
+        existing_email = (existing_row["email"] or existing_row["email_lower"] or "").strip()
+        existing_apollo_used = int(existing_row["apollo_used"] or 0)
+
+        was_credit_deferred = (
+            not existing_email
+            and existing_apollo_used == 0
+            and status in {"raw", "pending_credit_limit", "rejected"}
+            and (
+                "daily enrichment budget" in rejection_reason
+                or "credit" in rejection_reason
+                or "missing email; enrichment deferred" in rejection_reason
+                or "missing apollo identifiers" in rejection_reason
+            )
+        )
+        if was_credit_deferred and self._lead_is_allowed_by_location(lead):
+            return True
 
         was_location_skipped = (
             status in {"skipped", "raw"}
