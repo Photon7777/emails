@@ -491,6 +491,7 @@ class ColdEmailWorkflow:
                     )
 
                 gmail = None if dry_run else GmailClient(self.settings)
+                batch_company_counts: dict[str, int] = {}
 
                 for index, row in enumerate(pending_rows, start=1):
                     lead = Lead.from_row(row)
@@ -545,7 +546,12 @@ class ColdEmailWorkflow:
                         counts["skipped"] += 1
                         continue
 
-                    if db.company_contact_count_this_week(conn, lead) > self.settings.max_contacts_per_company_per_week:
+                    company_key = lead.normalized_domain or lead.normalized_company_name
+                    company_batch_count = batch_company_counts.get(company_key, 0) if company_key else 0
+                    if (
+                        db.company_contact_count_this_week(conn, lead) + company_batch_count
+                        >= self.settings.max_contacts_per_company_per_week
+                    ):
                         reason = "Company weekly contact limit reached"
                         db.mark_skipped(conn, lead_id, reason)
                         db.update_send_queue_status(conn, lead_id, "skipped", reason, send_queue_id)
@@ -604,6 +610,8 @@ class ColdEmailWorkflow:
                         )
                         db.record_email_event(conn, lead_id, "drafted", subject=subject)
                         counts["dry_run"] += 1
+                        if company_key:
+                            batch_company_counts[company_key] = company_batch_count + 1
                         continue
 
                     try:
@@ -617,6 +625,8 @@ class ColdEmailWorkflow:
                         db.update_send_queue_status(conn, lead_id, "sent", send_queue_id=send_queue_id)
                         db.record_email_event(conn, lead_id, "sent", subject=subject)
                         counts["sent"] += 1
+                        if company_key:
+                            batch_company_counts[company_key] = company_batch_count + 1
                     except Exception as exc:
                         logger.exception("Failed to send email to %s: %s", lead.email, exc)
                         db.mark_failed(conn, lead_id, str(exc))
@@ -860,6 +870,7 @@ class ColdEmailWorkflow:
         ).fetchall()
 
         queued = 0
+        batch_company_counts: dict[str, int] = {}
         for row in rows:
             if queued >= needed:
                 break
@@ -874,7 +885,12 @@ class ColdEmailWorkflow:
                 continue
             if db.email_already_sent(conn, lead.email_lower, int(row["id"])):
                 continue
-            if db.company_contact_count_this_week(conn, lead) >= self.settings.max_contacts_per_company_per_week:
+            company_key = lead.normalized_domain or lead.normalized_company_name
+            company_batch_count = batch_company_counts.get(company_key, 0) if company_key else 0
+            if (
+                db.company_contact_count_this_week(conn, lead) + company_batch_count
+                >= self.settings.max_contacts_per_company_per_week
+            ):
                 continue
             if not self._email_domain_matches_company(lead):
                 continue
@@ -900,6 +916,8 @@ class ColdEmailWorkflow:
                 continue
             if db.queue_lead_for_send(conn, lead, scheduled_send_time, subject, body):
                 queued += 1
+                if company_key:
+                    batch_company_counts[company_key] = company_batch_count + 1
 
         if queued:
             logger.info("Queued %s existing leads without Apollo enrichment", queued)
