@@ -341,11 +341,16 @@ class ColdEmailWorkflow:
                         if queued_lead_id:
                             counts["queued"] += 1
 
-                if counts["queued"] < settings.daily_send_target_min:
+                queue_target = max(
+                    settings.pending_inventory_target,
+                    settings.daily_send_target_min,
+                )
+                current_queued = self._queued_pending_count(conn)
+                if current_queued < queue_target:
                     queued_existing = self._top_up_queue_from_existing(
                         conn,
                         scheduled_send_time,
-                        settings.daily_send_target_min - counts["queued"],
+                        queue_target - current_queued,
                         block_items,
                     )
                     counts["queued_existing"] += queued_existing
@@ -824,10 +829,16 @@ class ColdEmailWorkflow:
 
     def _next_morning_send_time(self) -> str:
         now = datetime.now()
-        next_send = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= next_send:
-            next_send += timedelta(days=1)
-        return next_send.isoformat(timespec="seconds")
+        allowed_weekdays = {0, 1, 2}  # Monday primary, Tuesday/Wednesday overflow.
+        today_send = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now.weekday() in allowed_weekdays and now < today_send:
+            return today_send.isoformat(timespec="seconds")
+        for days_ahead in range(1, 8):
+            candidate_day = now + timedelta(days=days_ahead)
+            if candidate_day.weekday() in allowed_weekdays:
+                next_send = candidate_day.replace(hour=8, minute=0, second=0, microsecond=0)
+                return next_send.isoformat(timespec="seconds")
+        return today_send.isoformat(timespec="seconds")
 
     def _lead_is_allowed_by_location(self, lead: Lead) -> bool:
         apply_dmv_location(lead)
@@ -922,6 +933,23 @@ class ColdEmailWorkflow:
         if queued:
             logger.info("Queued %s existing leads without Apollo enrichment", queued)
         return queued
+
+    def _queued_pending_count(self, conn) -> int:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM send_queue q
+            JOIN leads l ON l.id = q.lead_id
+            WHERE q.queue_status = 'queued'
+              AND l.queue_status = 'queued'
+              AND l.status IN ('queued', 'send_ready')
+              AND COALESCE(l.email_sent, 0) = 0
+              AND COALESCE(l.manually_skipped, 0) = 0
+              AND l.email_lower IS NOT NULL
+              AND l.email_lower != ''
+            """
+        ).fetchone()
+        return int(row["count"] or 0)
 
     def _should_retry_existing_lead(self, existing_row, lead: Lead) -> bool:
         if int(existing_row["email_sent"] or 0) or int(existing_row["bounced"] or 0):

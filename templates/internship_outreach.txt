@@ -1,11 +1,11 @@
 Hi {first_name},
 
-I came across {company_name} while looking for U.S.-based full-time data, analytics, and AI roles.
+I came across {company_name} while looking for full-time data, analytics, and AI roles.
 
 {company_specific_reason}
 
-I am exploring full-time Data Analyst, Data Engineer, AI Engineer, or related early-career roles. My background includes Python, SQL, dashboards, ETL pipelines, AI/ML projects, and product analytics. I recently supported Walmart retail analytics and built a Streamlit forensic analytics dashboard for EY's UMD 2026 Case Competition.
+I am exploring early-career Data Analyst, Data Engineer, AI Engineer, or related roles. My background includes Python, SQL, dashboards, ETL pipelines, AI/ML projects, product analytics, Walmart retail analytics, and an EY case competition analytics dashboard.
 
-If there is a fit at {company_name}, I would be grateful to share more. If you are not the right person, would you be open to pointing me toward the right recruiter or hiring manager?
+If there may be a fit at {company_name}, I would be grateful to share more. If you are not the right person, would you be open to pointing me toward the right recruiter or hiring manager?
 
 Best,

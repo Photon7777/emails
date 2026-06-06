@@ -411,7 +411,6 @@ class ApolloClient:
             _title_text(person.get("job_title")),
             _title_text(person.get("job_titles")),
             _title_text(person.get("current_job_title")),
-            _title_text(person.get("employment_history")),
         )
         reason = self._build_reason(company_name, company_industry, title)
 

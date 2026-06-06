@@ -145,22 +145,27 @@ def _parse_company_size(raw_size: str) -> int | None:
 def disqualifying_reason(lead: Lead) -> str:
     """Return why a lead should not enter the full-time queue, or blank."""
 
-    combined = _text(
+    contact_text = _text(
         lead.title,
         lead.contact_title,
+    )
+    role_text = _text(
         lead.role_title,
         lead.reason_for_outreach,
-        lead.company_industry,
-        lead.raw_json,
     )
-    if re.search(r"\bintern(ship)?s?\b", combined):
+    combined = _text(
+        contact_text,
+        role_text,
+        lead.company_industry,
+    )
+    if re.search(r"\bintern(ship)?s?\b", contact_text):
+        return "Internship wording found in a full-time workflow"
+    if re.search(r"\bintern(ship)?s?\b", role_text) and not _contains_any(contact_text, ROLE_KEYWORDS):
         return "Internship wording found in a full-time workflow"
     if any(keyword in combined for keyword in {"unpaid", "volunteer"}):
         return "Unpaid or volunteer role signal"
     if any(keyword in combined for keyword in {"contract only", "contract-only"}):
         return "Contract-only role signal"
-    if _contains_any(combined, SENIOR_ONLY_KEYWORDS) and not _contains_any(combined, {"junior", "associate", "entry", "new grad", "0-2"}):
-        return "Senior-only role signal"
     contact_title_text = _text(lead.title, lead.contact_title)
     if _contains_any(contact_title_text, IRRELEVANT_TITLE_KEYWORDS) and not _contains_any(contact_title_text, ROLE_KEYWORDS):
         return "Irrelevant sales/marketing-only contact title"
@@ -188,6 +193,8 @@ def score_lead(lead: Lead, settings: Settings) -> tuple[int, dict[str, int | str
         location_fit = 13
     elif "apollo_us_full_time_tier:" in location_decision.location_match:
         location_fit = 10
+    elif location_decision.location_match == "us_general":
+        location_fit = 8
 
     keyword_fit = 0
     if _contains_any(industry_text, target_industries):

@@ -63,6 +63,25 @@ def metric_card(label: str, value, help_text: str = "") -> None:
     )
 
 
+def workflow_callout(title: str, body: str, tone: str = "info") -> None:
+    tones = {
+        "info": ("#1d4ed8", "#eff6ff", "#bfdbfe"),
+        "success": ("#047857", "#ecfdf5", "#a7f3d0"),
+        "warning": ("#b45309", "#fffbeb", "#fde68a"),
+        "danger": ("#b91c1c", "#fef2f2", "#fecaca"),
+    }
+    color, background, border = tones.get(tone, tones["info"])
+    st.markdown(
+        f"""
+        <div class="workflow-callout" style="border-color:{border}; background:{background};">
+            <div class="workflow-callout-title" style="color:{color};">{html.escape(title)}</div>
+            <div class="workflow-callout-body">{html.escape(body)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def resume_attachment_status_text() -> str:
     """Human-friendly attachment status for local and hosted dashboards."""
 
@@ -372,6 +391,34 @@ def next_8am_iso() -> str:
     return send_time.isoformat(timespec="seconds")
 
 
+def next_hybrid_send_window(now: datetime | None = None) -> tuple[str, str]:
+    now = now or datetime.now()
+    allowed_weekdays = {0: "Monday primary batch", 1: "Tuesday overflow batch", 2: "Wednesday overflow batch"}
+    today_send = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now.weekday() in allowed_weekdays and now < today_send:
+        return today_send.isoformat(timespec="seconds"), allowed_weekdays[now.weekday()]
+    for days_ahead in range(1, 8):
+        candidate = now + timedelta(days=days_ahead)
+        if candidate.weekday() in allowed_weekdays:
+            send_time = candidate.replace(hour=8, minute=0, second=0, microsecond=0)
+            return send_time.isoformat(timespec="seconds"), allowed_weekdays[candidate.weekday()]
+    return today_send.isoformat(timespec="seconds"), "Next hybrid send"
+
+
+def load_manual_send_candidates(limit: int = 50) -> pd.DataFrame:
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        db.init_db(conn)
+        rows = db.get_send_queue_candidates(conn, limit, settings.min_score_to_send)
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["email_subject"] = record.get("queue_email_subject") or ""
+        records.append(record)
+    return pd.DataFrame(records)
+
+
 def get_lead_row(lead_id: int):
     with db.connect(settings.database_path, settings.database_url) as conn:
         db.init_db(conn)
@@ -531,38 +578,118 @@ def setup_page() -> None:
     st.markdown(
         """
         <style>
-        .main .block-container {padding-top: 1.4rem;}
+        .main .block-container {
+            padding-top: 1.3rem;
+            max-width: 1500px;
+        }
+        h1, h2, h3 {
+            letter-spacing: 0;
+        }
+        .workflow-hero {
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            background: #111827;
+            padding: 18px 20px;
+            margin: 0.4rem 0 1rem 0;
+        }
+        .workflow-hero-kicker {
+            color: #93c5fd;
+            font-size: 0.82rem;
+            font-weight: 800;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+        .workflow-hero-title {
+            color: #f8fafc;
+            font-size: clamp(1.65rem, 3vw, 2.55rem);
+            line-height: 1.08;
+            font-weight: 900;
+            margin-top: 6px;
+        }
+        .workflow-hero-copy {
+            color: #cbd5e1;
+            max-width: 980px;
+            margin-top: 8px;
+            font-size: 1rem;
+            line-height: 1.45;
+        }
+        .workflow-callout {
+            border: 1px solid;
+            border-radius: 8px;
+            padding: 13px 16px;
+            margin: 0.7rem 0;
+        }
+        .workflow-callout-title {
+            font-weight: 850;
+            font-size: 0.96rem;
+            line-height: 1.25;
+            margin-bottom: 3px;
+        }
+        .workflow-callout-body {
+            color: #334155;
+            font-size: 0.94rem;
+            line-height: 1.38;
+        }
+        .schedule-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 0.7rem 0 1.1rem 0;
+        }
+        .schedule-card {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 14px;
+            min-height: 104px;
+        }
+        .schedule-card-title {
+            color: #f8fafc;
+            font-weight: 850;
+            line-height: 1.25;
+            margin-bottom: 7px;
+        }
+        .schedule-card-copy {
+            color: #cbd5e1;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        @media (max-width: 980px) {
+            .schedule-grid {
+                grid-template-columns: 1fr;
+            }
+        }
         .metric-card,
         div[data-testid="stMetric"] {
             background: #f8fafc;
-            border: 1px solid #d8dee9;
+            border: 1px solid #cbd5e1;
             border-radius: 8px;
-            padding: 14px 16px;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.10);
+            padding: 14px 15px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
         }
         .metric-card {
-            min-height: 112px;
+            min-height: 118px;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            gap: 10px;
+            gap: 9px;
             overflow: hidden;
             box-sizing: border-box;
             min-width: 0;
         }
         .metric-card-label {
-            color: #334155 !important;
-            font-size: 0.9rem;
+            color: #475569 !important;
+            font-size: 0.84rem;
             font-weight: 750;
-            line-height: 1.22;
+            line-height: 1.24;
             white-space: normal;
             overflow-wrap: anywhere;
         }
         .metric-card-value {
             color: #0f172a !important;
-            font-size: clamp(1.35rem, 1.65vw, 2rem);
+            font-size: clamp(1.28rem, 1.55vw, 1.9rem);
             font-weight: 850;
-            line-height: 1.05;
+            line-height: 1.08;
             max-width: 100%;
             min-width: 0;
             white-space: normal;
@@ -570,7 +697,7 @@ def setup_page() -> None:
             word-break: break-word;
         }
         .metric-card-value-long {
-            font-size: clamp(1.1rem, 1.28vw, 1.5rem);
+            font-size: clamp(1.02rem, 1.15vw, 1.35rem);
             line-height: 1.1;
         }
         @media (max-width: 1200px) {
@@ -610,6 +737,14 @@ def setup_page() -> None:
             font-weight: 600;
             background: #eef2ff;
             color: #3730a3;
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        section[data-testid="stSidebar"] {
+            border-right: 1px solid #1f2937;
         }
         </style>
         """,
@@ -941,11 +1076,40 @@ def overview() -> None:
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
     send_ready = int(leads["status"].isin(["send_ready", "queued"]).sum()) if not leads.empty else 0
     failed = int((leads["status"] == "failed").sum()) if not leads.empty else 0
+    next_send_time, next_send_label = next_hybrid_send_window()
 
     if settings.dry_run:
-        st.warning("DRY_RUN is active. Sender runs will draft/log only and will not send live emails.")
+        workflow_callout(
+            "Dry-run is active",
+            "Scheduled and manual sender runs will draft/log only until DRY_RUN is disabled.",
+            "warning",
+        )
     else:
-        st.error("DRY_RUN is disabled. Live sender can send emails if run with live confirmation.")
+        workflow_callout(
+            "Live full-time sending is enabled",
+            "The scheduled sender can send live Gmail API emails when the launchd wrapper supplies live confirmation.",
+            "danger",
+        )
+
+    st.markdown(
+        f"""
+        <div class="schedule-grid">
+            <div class="schedule-card">
+                <div class="schedule-card-title">Hybrid Send Cadence</div>
+                <div class="schedule-card-copy">Discovery runs nightly. Sending concentrates on Monday, with Tuesday and Wednesday reserved for overflow.</div>
+            </div>
+            <div class="schedule-card">
+                <div class="schedule-card-title">Next Scheduled Window</div>
+                <div class="schedule-card-copy">{html.escape(next_send_label)}<br>{html.escape(next_send_time)}</div>
+            </div>
+            <div class="schedule-card">
+                <div class="schedule-card-title">Manual Off-Schedule Send</div>
+                <div class="schedule-card-copy">Use the Manual Send page to copy local Terminal commands for reviewed full-time queue items.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     cols = st.columns(8)
     with cols[0]:
@@ -995,6 +1159,164 @@ def overview() -> None:
         else:
             by_status = leads.groupby("status", dropna=False).size().reset_index(name="count")
             st.plotly_chart(px.pie(by_status, values="count", names="status", title="Full-Time Leads by Status"), use_container_width=True)
+
+
+def manual_full_time_sender() -> None:
+    st.header("Manual Full-Time Send Commands")
+    st.caption("Use this page to review the queue and copy local Mac commands for off-schedule full-time sends.")
+
+    candidates = load_manual_send_candidates(100)
+    sent_today_df = read_sql(
+        """
+        SELECT COALESCE(SUM(sent_count), 0) AS sent_count
+        FROM automation_runs
+        WHERE run_type = 'sender'
+          AND substr(started_at, 1, 10) = ?
+        """,
+        (date.today().isoformat(),),
+    )
+    sent_today = int(sent_today_df.iloc[0]["sent_count"]) if not sent_today_df.empty else 0
+    remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
+    next_send_time, next_send_label = next_hybrid_send_window()
+    resume_ready = bool(settings.attach_resume and settings.resume_file.exists())
+    gmail_ready = bool(settings.gmail_credentials_file.exists() and settings.gmail_token_file.exists())
+
+    if settings.dry_run:
+        workflow_callout(
+            "Dry-run is active",
+            "The local live command will not send until DRY_RUN is disabled in your Mac runtime .env.",
+            "warning",
+        )
+    else:
+        workflow_callout(
+            "Copy-paste local send commands are ready",
+            "Run these commands on your Mac. The hosted dashboard only generates commands and never sends Gmail messages directly.",
+            "danger",
+        )
+
+    cols = st.columns(6)
+    with cols[0]:
+        metric_card("Queued Candidates", len(candidates))
+    with cols[1]:
+        metric_card("Daily Capacity", remaining_capacity)
+    with cols[2]:
+        metric_card("Default Daily Limit", settings.daily_send_limit)
+    with cols[3]:
+        metric_card("Min Send Score", settings.min_score_to_send)
+    with cols[4]:
+        metric_card("Resume", "Ready" if resume_ready else "Missing")
+    with cols[5]:
+        metric_card("Gmail OAuth", "Ready" if gmail_ready else "Missing")
+
+    st.markdown(
+        f"""
+        <div class="schedule-grid">
+            <div class="schedule-card">
+                <div class="schedule-card-title">Normal Schedule</div>
+                <div class="schedule-card-copy">Next automatic window: {html.escape(next_send_label)} at {html.escape(next_send_time)}.</div>
+            </div>
+            <div class="schedule-card">
+                <div class="schedule-card-title">Copy-Paste Workflow</div>
+                <div class="schedule-card-copy">Use the generated commands below in Terminal on your Mac. The dashboard will refresh from the shared database after sending.</div>
+            </div>
+            <div class="schedule-card">
+                <div class="schedule-card-title">Attachment Rule</div>
+                <div class="schedule-card-copy">Live sends require the resume PDF to be readable by the local Mac runtime, not the hosted dashboard.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("Queued Email Preview")
+    if candidates.empty:
+        st.info("No approved full-time contacts are currently queued for sending.")
+    else:
+        preview = candidates[
+            [
+                "full_name",
+                "title",
+                "company_name",
+                "email",
+                "lead_score",
+                "queue_scheduled_send_time",
+                "email_subject",
+            ]
+        ].rename(
+            columns={
+                "full_name": "Full name",
+                "title": "Title",
+                "company_name": "Company",
+                "email": "Email",
+                "lead_score": "Score",
+                "queue_scheduled_send_time": "Queued time",
+                "email_subject": "Subject",
+            }
+        )
+        st.dataframe(preview.head(50), use_container_width=True, hide_index=True)
+
+    st.subheader("Copy-Paste Terminal Commands")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        max_limit = max(1, min(settings.daily_send_limit or 30, max(len(candidates), 1)))
+        default_limit = min(5, max_limit)
+        send_limit = st.number_input("Emails to process", min_value=1, max_value=max_limit, value=default_limit)
+    with c2:
+        include_logs = st.checkbox("Include log tail command", value=True)
+    with c3:
+        st.write("")
+        st.write("")
+        st.caption("Run dry-run first, then live command only after reviewing output.")
+
+    runtime_dir = '$HOME/Library/Application\\ Support/cold_email_workflow'
+    dry_run_command = (
+        f'cd {runtime_dir} && '
+        f'.venv/bin/python run_sender.py --dry-run --limit {int(send_limit)}'
+    )
+    live_command = (
+        f'cd {runtime_dir} && '
+        f'LIVE_SEND_CONFIRM=I_UNDERSTAND_SEND_LIVE_EMAILS '
+        f'.venv/bin/python run_sender.py --live --limit {int(send_limit)}'
+    )
+    status_command = f'cd {runtime_dir} && .venv/bin/python main.py status'
+    log_command = f'cd {runtime_dir} && tail -n 80 logs/send.log'
+
+    if candidates.empty:
+        st.warning("No queued candidates are available, so these commands will not send anything yet.")
+    if not resume_ready:
+        st.warning("Hosted dashboard may show the resume as missing because it cannot inspect your Mac files. The local command will validate the Mac runtime resume path before sending.")
+    if not gmail_ready:
+        st.warning("Hosted dashboard may not see Gmail OAuth files. The local Mac command will use the runtime credentials.json and token.json.")
+
+    workflow_callout(
+        "Important",
+        "The hosted dashboard does not send directly. Copy these commands into Terminal on your Mac so Gmail OAuth, resume attachment, local logs, and launchd-safe paths are used.",
+        "info",
+    )
+
+    st.markdown("**1. Dry-run first**")
+    st.code(dry_run_command, language="bash")
+
+    st.markdown("**2. If the dry-run looks good, run live send**")
+    st.code(live_command, language="bash")
+
+    st.markdown("**3. Confirm status afterward**")
+    st.code(status_command, language="bash")
+
+    if include_logs:
+        st.markdown("**4. Check local send logs**")
+        st.code(log_command, language="bash")
+
+    with st.expander("Safety details"):
+        st.write(
+            "These commands use the same full-time sender as launchd: score threshold, queue status, "
+            "approved flag, duplicate checks, company weekly limits, full-time wording validation, "
+            "Gmail API sending, resume attachment validation, and email event logging."
+        )
+        st.write("The live command bypasses only the weekday shell wrapper. It still uses run_sender.py safety confirmation.")
+        st.write(f"Resume path: {settings.resume_file}")
+        st.write(f"Gmail credentials: {settings.gmail_credentials_file}")
+        st.write(f"Gmail token: {settings.gmail_token_file}")
 
 
 def lead_pipeline() -> None:
@@ -1878,8 +2200,18 @@ def umd_ta_ra_outreach_page() -> None:
 
 
 setup_page()
-st.title("Full-Time Job Outreach Dashboard")
-st.caption("Local monitoring for Apollo full-time discovery, Gmail readiness, and automation health.")
+st.markdown(
+    """
+    <div class="workflow-hero">
+        <div class="workflow-hero-kicker">InternReach AI</div>
+        <div class="workflow-hero-title">Full-Time Job Outreach Dashboard</div>
+        <div class="workflow-hero-copy">
+            Monitor Apollo discovery, queue quality, Gmail readiness, hybrid Monday sending, manual off-schedule sends, and UMD TA/RA outreach from one operations view.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 page = st.sidebar.radio(
     "Navigation",
@@ -1887,6 +2219,7 @@ page = st.sidebar.radio(
         "Overview",
         "Full-Time Review",
         "Credits",
+        "Manual Send",
         "UMD TA/RA Outreach",
         "Full-Time Pipeline",
         "Full-Time Lead Table",
@@ -1903,6 +2236,8 @@ with st.spinner("Loading workflow data..."):
         daily_discovery_review()
     elif page == "Credits":
         apollo_credits_page()
+    elif page == "Manual Send":
+        manual_full_time_sender()
     elif page == "UMD TA/RA Outreach":
         umd_ta_ra_outreach_page()
     elif page == "Full-Time Pipeline":

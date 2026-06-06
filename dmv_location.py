@@ -2,7 +2,8 @@
 
 The historical names still say DMV because the original workflow was DMV-only.
 For the main workflow, ``is_dmv`` now means "allowed target location": DMV,
-remote U.S., or a strong U.S. hub from a full-time Apollo search tier.
+remote U.S., general U.S. full-time, or a strong U.S. hub from a full-time
+Apollo search tier.
 """
 
 from __future__ import annotations
@@ -188,6 +189,9 @@ def evaluate_dmv_location(lead: Lead) -> LocationDecision:
 
     if country in {"united states", "united states of america", "usa", "us"} and any(tier in source_tier for tier in US_FULL_TIME_SEARCH_TIERS):
         return LocationDecision(True, False, f"apollo_us_full_time_tier:{lead.search_tier or lead.source_tier}", internship_type or "full_time")
+
+    if country in {"united states", "united states of america", "usa", "us"}:
+        return LocationDecision(True, False, "us_general", internship_type or "full_time")
 
     if not city and not state and not any(term in text for term in REMOTE_TERMS):
         return LocationDecision(False, False, "missing_location", internship_type)

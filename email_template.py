@@ -72,17 +72,17 @@ def _company_fit_area(industry: str) -> str:
 
 def _role_angle(role: str) -> str:
     normalized = role.lower()
-    readable_role = role if len(role) <= 70 else ""
+    readable_role = role if len(role) <= 55 else ""
     if any(keyword in normalized for keyword in ("recruit", "talent", "people", "human resources")):
-        return "Your recruiting focus made you seem like a good person to ask about full-time data and AI roles."
+        return "Your recruiting focus made you a good person to ask about data and AI roles."
     if any(keyword in normalized for keyword in ("data", "analytics", "science", "machine learning", "ml", "ai")):
         if readable_role:
-            return f"Your {readable_role} role looked close to the data and AI work I hope to support."
+            return f"Your {readable_role} role looked close to the work I hope to support."
         return "Your work looked close to the data and AI work I hope to support."
     if any(keyword in normalized for keyword in ("founder", "co-founder", "owner")):
-        return "Your leadership role made you seem like someone who would know where a data-focused early-career candidate could be useful."
+        return "Your leadership role made you seem close to team growth and hiring."
     if any(keyword in normalized for keyword in ("manager", "director", "head", "lead")):
-        return f"Your {role} role made you seem close to teams where data and AI skills could add practical support."
+        return "Your role made you seem close to teams where data and AI skills could help."
     return "Your role looked connected to hiring or team growth, so I wanted to reach out thoughtfully."
 
 
@@ -96,7 +96,7 @@ def _company_specific_reason(lead: Lead) -> tuple[str, str]:
     if lead.remote_dmv_eligible:
         location_text = " The remote signal also fit my search."
     elif location:
-        location_text = f" I also noticed the contact location listed as {location}."
+        location_text = f" I also noticed the U.S. location listed as {location}."
     else:
         location_text = ""
     industry_text = industry if industry and industry != "your industry" else "data-relevant work"
