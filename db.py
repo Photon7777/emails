@@ -96,6 +96,7 @@ BLOCKING_STATUSES = {
 
 
 POSTGRES_SCHEMES = ("postgres://", "postgresql://", "postgresql+psycopg2://", "postgresql+psycopg://")
+INIT_DB_ADVISORY_LOCK_ID = 724893170042691
 
 
 def _database_url_from_env() -> str:
@@ -213,6 +214,31 @@ def connect(database_path: Path, database_url: str = ""):
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    """Create or migrate tables.
+
+    Streamlit can issue several cached queries at once. On Postgres, schema
+    initialization includes DDL and small backfills, so serialize it with a
+    session-level advisory lock to avoid migration deadlocks.
+    """
+
+    locked = False
+    if is_postgres_connection(conn):
+        conn.execute("SELECT pg_advisory_lock(?)", (INIT_DB_ADVISORY_LOCK_ID,))
+        locked = True
+    try:
+        _init_db_unlocked(conn)
+    finally:
+        if locked:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(?)", (INIT_DB_ADVISORY_LOCK_ID,))
+                conn.commit()
+            except Exception:
+                # Session-level advisory locks are also released when the
+                # connection closes, so do not mask the original init error.
+                pass
+
+
+def _init_db_unlocked(conn: sqlite3.Connection) -> None:
     id_column = "SERIAL PRIMARY KEY" if is_postgres_connection(conn) else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
         f"""
@@ -461,18 +487,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_fit_score ON umd_ta_ra_contacts(fit_score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_fit_bucket ON umd_ta_ra_contacts(fit_bucket)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umd_contacts_source_url ON umd_ta_ra_contacts(source_url)")
-    conn.execute(
-        """
-        UPDATE umd_ta_ra_contacts
-        SET fit_bucket = CASE
-            WHEN COALESCE(fit_score, 0) >= 80 THEN 'High Fit'
-            WHEN COALESCE(fit_score, 0) >= 65 THEN 'Good Fit'
-            WHEN COALESCE(fit_score, 0) >= 50 THEN 'Medium Fit'
-            ELSE 'Low Fit'
-        END
-        WHERE fit_bucket IS NULL OR fit_bucket = ''
-        """
-    )
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS umd_ta_ra_email_drafts (

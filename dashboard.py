@@ -40,10 +40,28 @@ apply_streamlit_secrets_to_env()
 settings = load_settings()
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_dashboard_db_ready() -> bool:
+    with db.connect(settings.database_path, settings.database_url) as conn:
+        try:
+            conn.execute("SELECT 1 FROM leads LIMIT 1").fetchone()
+            conn.execute("SELECT 1 FROM umd_ta_ra_contacts LIMIT 1").fetchone()
+        except Exception as exc:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+            message = str(exc).lower()
+            if "does not exist" not in message and "no such table" not in message:
+                raise
+            db.init_db(conn)
+    return True
+
+
+ensure_dashboard_db_ready()
+
+
 @st.cache_data(ttl=20)
 def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         rows = conn.execute(query, params).fetchall()
         return pd.DataFrame([dict(row) for row in rows])
 
@@ -162,7 +180,6 @@ def load_search_logs() -> pd.DataFrame:
 def load_credit_summary(month_start_iso: str) -> dict:
     selected_month = date.fromisoformat(month_start_iso)
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         return credits_service.calculate_credit_summary(conn, settings, selected_month).to_dict()
 
 
@@ -407,7 +424,6 @@ def next_hybrid_send_window(now: datetime | None = None) -> tuple[str, str]:
 
 def load_manual_send_candidates(limit: int = 50) -> pd.DataFrame:
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         rows = db.get_send_queue_candidates(conn, limit, settings.min_score_to_send)
     if not rows:
         return pd.DataFrame()
@@ -421,7 +437,6 @@ def load_manual_send_candidates(limit: int = 50) -> pd.DataFrame:
 
 def get_lead_row(lead_id: int):
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         return conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
 
 
@@ -429,7 +444,6 @@ def mark_manual_skip(lead_id: int, note: str) -> None:
     reason = note.strip() or "Manually skipped in Daily Full-Time Review"
     now = utc_now_iso()
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         conn.execute(
             """
             UPDATE leads
@@ -463,7 +477,6 @@ def remove_from_queue(lead_id: int, note: str) -> None:
     reason = note.strip() or "Removed from 8 AM queue in Daily Full-Time Review"
     now = utc_now_iso()
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         conn.execute(
             """
             UPDATE leads
@@ -508,7 +521,6 @@ def approve_for_queue(lead_id: int, note: str = "") -> tuple[bool, str]:
     lead.manual_review_note = note.strip()
     subject, body = render_email(lead, settings)
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         db.upsert_lead(conn, lead)
         queued_id = db.queue_lead_for_send(conn, lead, next_8am_iso(), subject, body)
     if not queued_id:
@@ -1482,7 +1494,6 @@ def _credit_health_banner(summary: dict) -> None:
 
 def _insert_manual_credit_event(event_type: str, amount: int, event_date: date, note: str) -> None:
     with db.connect(settings.database_path, settings.database_url) as conn:
-        db.init_db(conn)
         description = note.strip() or (
             "Manual Apollo credit top-up entered from dashboard"
             if event_type == "top_up"
