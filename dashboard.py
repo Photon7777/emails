@@ -1116,7 +1116,7 @@ def overview() -> None:
             </div>
             <div class="schedule-card">
                 <div class="schedule-card-title">Manual Off-Schedule Send</div>
-                <div class="schedule-card-copy">Use the Manual Send page to copy local Terminal commands for reviewed full-time queue items.</div>
+                <div class="schedule-card-copy">Use the Manual Send page to copy contact details, subjects, and email bodies for reviewed full-time queue items.</div>
             </div>
         </div>
         """,
@@ -1174,8 +1174,8 @@ def overview() -> None:
 
 
 def manual_full_time_sender() -> None:
-    st.header("Manual Full-Time Send Commands")
-    st.caption("Use this page to review the queue and copy local Mac commands for off-schedule full-time sends.")
+    st.header("Manual Full-Time Email Copy Center")
+    st.caption("Review queued full-time contacts and copy the recipient, subject, and body into your own Gmail compose window.")
 
     candidates = load_manual_send_candidates(100)
     sent_today_df = read_sql(
@@ -1191,19 +1191,18 @@ def manual_full_time_sender() -> None:
     remaining_capacity = max(settings.daily_send_limit - sent_today, 0)
     next_send_time, next_send_label = next_hybrid_send_window()
     resume_ready = bool(settings.attach_resume and settings.resume_file.exists())
-    gmail_ready = bool(settings.gmail_credentials_file.exists() and settings.gmail_token_file.exists())
 
     if settings.dry_run:
         workflow_callout(
-            "Dry-run is active",
-            "The local live command will not send until DRY_RUN is disabled in your Mac runtime .env.",
+            "Manual copy mode",
+            "This page does not send emails. It only gives you clean draft text to copy into your own Gmail message.",
             "warning",
         )
     else:
         workflow_callout(
-            "Copy-paste local send commands are ready",
-            "Run these commands on your Mac. The hosted dashboard only generates commands and never sends Gmail messages directly.",
-            "danger",
+            "Manual copy mode",
+            "Even with live automation enabled, this page will not send Gmail messages. You stay in control by copying each draft manually.",
+            "info",
         )
 
     cols = st.columns(6)
@@ -1218,7 +1217,7 @@ def manual_full_time_sender() -> None:
     with cols[4]:
         metric_card("Resume", "Ready" if resume_ready else "Missing")
     with cols[5]:
-        metric_card("Gmail OAuth", "Ready" if gmail_ready else "Missing")
+        metric_card("Copy Mode", "Manual")
 
     st.markdown(
         f"""
@@ -1229,11 +1228,11 @@ def manual_full_time_sender() -> None:
             </div>
             <div class="schedule-card">
                 <div class="schedule-card-title">Copy-Paste Workflow</div>
-                <div class="schedule-card-copy">Use the generated commands below in Terminal on your Mac. The dashboard will refresh from the shared database after sending.</div>
+                <div class="schedule-card-copy">Pick a queued contact, then copy the To address, subject, and body into Gmail.</div>
             </div>
             <div class="schedule-card">
                 <div class="schedule-card-title">Attachment Rule</div>
-                <div class="schedule-card-copy">Live sends require the resume PDF to be readable by the local Mac runtime, not the hosted dashboard.</div>
+                <div class="schedule-card-copy">When sending manually, attach the current resume PDF yourself before sending.</div>
             </div>
         </div>
         """,
@@ -1267,68 +1266,100 @@ def manual_full_time_sender() -> None:
         )
         st.dataframe(preview.head(50), use_container_width=True, hide_index=True)
 
-    st.subheader("Copy-Paste Terminal Commands")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        max_limit = max(1, min(settings.daily_send_limit or 30, max(len(candidates), 1)))
-        default_limit = min(5, max_limit)
-        send_limit = st.number_input("Emails to process", min_value=1, max_value=max_limit, value=default_limit)
-    with c2:
-        include_logs = st.checkbox("Include log tail command", value=True)
-    with c3:
-        st.write("")
-        st.write("")
-        st.caption("Run dry-run first, then live command only after reviewing output.")
-
-    runtime_dir = '$HOME/Library/Application\\ Support/cold_email_workflow'
-    dry_run_command = (
-        f'cd {runtime_dir} && '
-        f'.venv/bin/python run_sender.py --dry-run --limit {int(send_limit)}'
-    )
-    live_command = (
-        f'cd {runtime_dir} && '
-        f'LIVE_SEND_CONFIRM=I_UNDERSTAND_SEND_LIVE_EMAILS '
-        f'.venv/bin/python run_sender.py --live --limit {int(send_limit)}'
-    )
-    status_command = f'cd {runtime_dir} && .venv/bin/python main.py status'
-    log_command = f'cd {runtime_dir} && tail -n 80 logs/send.log'
-
+    st.subheader("Copy One Email Draft")
     if candidates.empty:
-        st.warning("No queued candidates are available, so these commands will not send anything yet.")
-    if not resume_ready:
-        st.warning("Hosted dashboard may show the resume as missing because it cannot inspect your Mac files. The local command will validate the Mac runtime resume path before sending.")
-    if not gmail_ready:
-        st.warning("Hosted dashboard may not see Gmail OAuth files. The local Mac command will use the runtime credentials.json and token.json.")
+        st.warning("No queued candidates are available to copy yet.")
+    else:
+        candidate_records = candidates.to_dict("records")
+        labels = {
+            (
+                f"{row.get('full_name') or 'Unknown'} | "
+                f"{row.get('company_name') or 'Unknown company'} | "
+                f"{row.get('email') or 'missing email'} | "
+                f"score {int(row.get('lead_score') or 0)}"
+            ): row
+            for row in candidate_records
+        }
+        selected_label = st.selectbox("Select queued contact", list(labels.keys()))
+        selected = labels[selected_label]
 
-    workflow_callout(
-        "Important",
-        "The hosted dashboard does not send directly. Copy these commands into Terminal on your Mac so Gmail OAuth, resume attachment, local logs, and launchd-safe paths are used.",
-        "info",
-    )
+        subject = selected.get("queue_email_subject") or selected.get("email_subject") or ""
+        body = selected.get("queue_email_body") or ""
+        if not subject or not body:
+            lead = Lead.from_row(selected)
+            subject, body = render_email(lead, settings)
 
-    st.markdown("**1. Dry-run first**")
-    st.code(dry_run_command, language="bash")
+        contact_lines = [
+            f"Name: {selected.get('full_name') or ''}",
+            f"Title: {selected.get('title') or ''}",
+            f"Company: {selected.get('company_name') or ''}",
+            f"Email: {selected.get('email') or ''}",
+            f"LinkedIn: {selected.get('linkedin_url') or ''}",
+            f"Score: {int(selected.get('lead_score') or 0)}",
+            f"Queued time: {selected.get('queue_scheduled_send_time') or ''}",
+        ]
+        contact_card = "\n".join(line for line in contact_lines if not line.endswith(": "))
 
-    st.markdown("**2. If the dry-run looks good, run live send**")
-    st.code(live_command, language="bash")
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.markdown("**Contact to copy**")
+            st.text_area("Contact details", value=contact_card, height=170)
+        with c2:
+            st.markdown("**Gmail fields**")
+            st.text_input("To", value=selected.get("email") or "")
+            st.text_input("Subject", value=subject)
 
-    st.markdown("**3. Confirm status afterward**")
-    st.code(status_command, language="bash")
+        st.markdown("**Email body**")
+        st.text_area("Body", value=body, height=420)
 
-    if include_logs:
-        st.markdown("**4. Check local send logs**")
-        st.code(log_command, language="bash")
-
-    with st.expander("Safety details"):
-        st.write(
-            "These commands use the same full-time sender as launchd: score threshold, queue status, "
-            "approved flag, duplicate checks, company weekly limits, full-time wording validation, "
-            "Gmail API sending, resume attachment validation, and email event logging."
+        workflow_callout(
+            "Manual sending reminder",
+            "Before sending from Gmail, attach your resume PDF and confirm the company/contact still looks relevant.",
+            "info",
         )
-        st.write("The live command bypasses only the weekday shell wrapper. It still uses run_sender.py safety confirmation.")
-        st.write(f"Resume path: {settings.resume_file}")
-        st.write(f"Gmail credentials: {settings.gmail_credentials_file}")
-        st.write(f"Gmail token: {settings.gmail_token_file}")
+
+    st.subheader("Bulk Copy / Download")
+    if candidates.empty:
+        st.info("Bulk export will appear once queued candidates are available.")
+    else:
+        export_rows = []
+        for row in candidates.to_dict("records"):
+            subject = row.get("queue_email_subject") or row.get("email_subject") or ""
+            body = row.get("queue_email_body") or ""
+            if not subject or not body:
+                lead = Lead.from_row(row)
+                subject, body = render_email(lead, settings)
+            export_rows.append(
+                {
+                    "full_name": row.get("full_name") or "",
+                    "title": row.get("title") or "",
+                    "company": row.get("company_name") or "",
+                    "email": row.get("email") or "",
+                    "linkedin_url": row.get("linkedin_url") or "",
+                    "score": int(row.get("lead_score") or 0),
+                    "subject": subject,
+                    "body": body,
+                }
+            )
+        export_df = pd.DataFrame(export_rows)
+        st.dataframe(
+            export_df[["full_name", "title", "company", "email", "score", "subject"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.download_button(
+            "Download queued email drafts CSV",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"full_time_manual_email_drafts_{date.today().isoformat()}.csv",
+            mime="text/csv",
+        )
+
+    with st.expander("What this page does and does not do"):
+        st.write(
+            "This page only displays queued contacts and draft copy. It does not send emails, "
+            "does not call Gmail, and does not mark contacts as sent."
+        )
+        st.write("If you send manually, attach your resume in Gmail before clicking Send.")
 
 
 def lead_pipeline() -> None:
